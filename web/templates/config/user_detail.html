@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block page_title %}User Details{% endblock %}
+
+{% block content %}
+<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px;">
+    <div>
+        <h2 style="font-size:18px;font-weight:600;margin:0;">User Details</h2>
+        <p style="font-size:13px;color:var(--text-muted);margin:6px 0 0;">
+            Username: <span style="font-family:monospace;color:var(--text-primary);">{{ user.username }}</span>
+        </p>
+    </div>
+    {% if not is_self and can_reset_password %}
+        <a class="btn" style="font-size:12px;" href="/config/users">← Back to Users</a>
+    {% endif %}
+</div>
+
+<div class="card" style="max-width:760px;">
+    <div class="card-header">
+        <h3 style="margin:0;">Profile</h3>
+        <span style="font-size:12px;color:var(--text-muted);">Permission group: {{ user.role }}</span>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <tbody>
+                <tr><th style="width:190px;">First name</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <input class="form-control" type="text" id="ud-first-name" value="{{ user.first_name or '' }}" style="max-width:420px;">
+                        {% else %}
+                            {{ user.first_name or '—' }}
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Last name</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <input class="form-control" type="text" id="ud-last-name" value="{{ user.last_name or '' }}" style="max-width:420px;">
+                        {% else %}
+                            {{ user.last_name or '—' }}
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Email</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <input class="form-control" type="email" id="ud-email" value="{{ user.email or '' }}" style="max-width:420px;">
+                        {% else %}
+                            {{ user.email or '—' }}
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Phone</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <input class="form-control" type="text" id="ud-phone" value="{{ user.phone or '' }}" style="max-width:420px;">
+                        {% else %}
+                            {{ user.phone or '—' }}
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Agency</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <input class="form-control" type="text" id="ud-agency" value="{{ user.agency or '' }}" style="max-width:420px;">
+                        {% else %}
+                            {{ user.agency or '—' }}
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Permission group</th>
+                    <td style="font-size:13px;color:var(--text-primary);">
+                        {% if can_reset_password %}
+                            <select class="form-control" id="ud-role" style="max-width:260px;"
+                                    {% if is_self %}disabled{% endif %}
+                                    onchange="updateRoleFromDetails()">
+                                {% for r in roles %}
+                                    <option value="{{ r }}" {% if r == user.role %}selected{% endif %}>{{ r }}</option>
+                                {% endfor %}
+                            </select>
+                        {% else %}
+                            {{ user.role }} <span style="font-size:12px;color:var(--text-muted);">(read-only)</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    {% if can_reset_password %}
+    <div style="padding:14px 16px 18px;">
+        <button class="btn btn-primary" style="font-size:12px;" onclick="saveUserProfile()">Save Profile</button>
+        <div id="ud-profile-error" style="display:none;margin-top:12px;border:1px solid rgba(239,68,68,0.3);background:rgba(239,68,68,0.08);border-radius:8px;padding:12px;color:var(--red);font-size:13px;"></div>
+    </div>
+    {% endif %}
+</div>
+
+{% if is_self %}
+<div class="card" style="max-width:760px;margin-top:16px;">
+    <div class="card-header">
+        <h3 style="margin:0;">Feeder claim key</h3>
+        <span style="font-size:12px;color:var(--text-muted);">Permanent — use on your feeder</span>
+    </div>
+    <div style="padding:16px;">
+        {% if feeder_claim_key %}
+        <p style="margin:0 0 10px 0;font-size:13px;color:var(--text-secondary);line-height:1.55;">
+            Paste this key into your <strong>feeder</strong> configuration (Beast client that connects to the aggregator). On each TCP connection the feeder must send one ASCII line with this key <em>before</em> any Beast binary data; the aggregator then assigns you as this feeder’s owner (unless an admin has locked the owner list). See project file <code>FEEDER_CLAIM_CLIENT_SPEC.md</code> for the exact wire format.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:stretch;">
+            <code id="feeder-claim-key-val" style="flex:1;min-width:220px;font-size:12px;padding:10px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;word-break:break-all;display:block;">{{ feeder_claim_key }}</code>
+            <button type="button" class="btn" style="font-size:12px;align-self:center;" onclick="copyFeederClaimKey()">Copy</button>
+        </div>
+        <p style="margin:12px 0 0 0;font-size:11px;color:var(--text-muted);">Keep private — anyone with this key can claim feeders as you until an admin locks ownership.</p>
+        {% else %}
+        <p style="margin:0;font-size:13px;color:var(--text-secondary);">Your feeder claim key is created when your account is <strong>active</strong> (after an administrator approves registration).</p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% if can_reset_password %}
+<div class="card" style="max-width:760px;margin-top:16px;border-color:rgba(239,68,68,0.35);">
+    <div class="card-header" style="background:rgba(239,68,68,0.06);">
+        <h3 style="margin:0;">Reset Password</h3>
+        <span style="font-size:12px;color:var(--text-muted);">Admin-only action</span>
+    </div>
+
+    <div style="padding:16px;">
+        <button class="btn" style="font-size:12px;" onclick="showResetModal()">Reset Password</button>
+        <div id="user-detail-reset-error" style="display:none;margin-top:12px;border:1px solid rgba(239,68,68,0.3);background:rgba(239,68,68,0.08);border-radius:8px;padding:12px;color:var(--red);font-size:13px;"></div>
+    </div>
+</div>
+
+<!-- Reset Password Modal -->
+<div class="modal-overlay" id="reset-user-detail-modal">
+    <div class="modal" style="max-width:380px;">
+        <div class="modal-header">
+            <h3>Reset Password</h3>
+            <button class="modal-close" onclick="closeUserDetailModal()" type="button">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                Set new password for <strong>{{ user.username }}</strong>
+            </div>
+            <div class="form-group">
+                <label>New Password</label>
+                <input class="form-control" type="password" id="reset-user-detail-password" autocomplete="new-password">
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="closeUserDetailModal()" type="button">Cancel</button>
+                <button class="btn btn-primary" onclick="resetUserDetailPassword()" type="button">Reset Password</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if can_delete_user %}
+<div class="card" style="max-width:760px;margin-top:16px;border-color:rgba(239,68,68,0.45);">
+    <div class="card-header" style="background:rgba(239,68,68,0.08);">
+        <h3 style="margin:0;">Delete user</h3>
+        <span style="font-size:12px;color:var(--text-muted);">Admin only — cannot be undone</span>
+    </div>
+    <div style="padding:16px;">
+        <p style="margin:0 0 14px 0;font-size:13px;color:var(--text-secondary);line-height:1.5;">
+            Permanently remove <strong style="font-family:monospace;color:var(--text-primary);">{{ user.username }}</strong> from the system. They will not be able to sign in and all account data for this user will be deleted.
+        </p>
+        <button type="button" class="btn btn-danger" style="font-size:12px;" onclick="deleteUserFromDetail()">Delete user</button>
+        <div id="user-detail-delete-error" style="display:none;margin-top:12px;border:1px solid rgba(239,68,68,0.3);background:rgba(239,68,68,0.08);border-radius:8px;padding:12px;color:var(--red);font-size:13px;"></div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let resetUserDetailId = {{ user.id }};
+
+function copyFeederClaimKey() {
+    var el = document.getElementById('feeder-claim-key-val');
+    if (!el) return;
+    var t = el.textContent || '';
+    if (!t) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(function() { alert('Copied to clipboard'); }).catch(function() { fallbackCopy(t); });
+    } else {
+        fallbackCopy(t);
+    }
+}
+function fallbackCopy(t) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); alert('Copied to clipboard'); } catch(e) { alert('Copy failed'); }
+    document.body.removeChild(ta);
+}
+
+async function updateRoleFromDetails() {
+    const sel = document.getElementById('ud-role');
+    if (!sel) return;
+    const role = sel.value;
+    try {
+        const r = await fetch('/config/users/' + resetUserDetailId + '/role', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({role})
+        });
+        const d = await r.json();
+        if (!d.success) {
+            alert('Error updating role: ' + (d.error || 'unknown'));
+            location.reload();
+        } else {
+            location.reload();
+        }
+    } catch (e) {
+        alert('Error updating role');
+    }
+}
+
+async function saveUserProfile() {
+    const errEl = document.getElementById('ud-profile-error');
+    if (errEl) {
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+    }
+
+    const body = {
+        first_name: document.getElementById('ud-first-name')?.value ?? '',
+        last_name: document.getElementById('ud-last-name')?.value ?? '',
+        email: document.getElementById('ud-email')?.value ?? '',
+        phone: document.getElementById('ud-phone')?.value ?? '',
+        agency: document.getElementById('ud-agency')?.value ?? '',
+    };
+
+    try {
+        const r = await fetch('/config/users/' + resetUserDetailId + '/profile', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(body)
+        });
+        const d = await r.json();
+        if (d.success) {
+            location.reload();
+        } else {
+            if (errEl) {
+                errEl.textContent = d.error || 'Error saving profile';
+                errEl.style.display = 'block';
+            } else {
+                alert('Error saving profile');
+            }
+        }
+    } catch (e) {
+        if (errEl) {
+            errEl.textContent = 'Error saving profile';
+            errEl.style.display = 'block';
+        }
+    }
+}
+
+function closeUserDetailModal() {
+    document.getElementById('reset-user-detail-modal').classList.remove('show');
+    const errEl = document.getElementById('user-detail-reset-error');
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+}
+
+function showResetModal() {
+    const pw = document.getElementById('reset-user-detail-password');
+    if (pw) pw.value = '';
+    closeUserDetailModal(); // ensure err reset state
+    document.getElementById('reset-user-detail-modal').classList.add('show');
+}
+
+async function deleteUserFromDetail() {
+    const errEl = document.getElementById('user-detail-delete-error');
+    if (errEl) {
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+    }
+    const uname = {{ user.username|tojson }};
+    if (!confirm('Permanently delete user "' + uname + '"? This cannot be undone.')) return;
+    try {
+        const r = await fetch('/config/users/' + resetUserDetailId + '/delete', { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+            window.location.href = '/config/users';
+        } else {
+            const msg = d.error || d.message || 'Delete failed';
+            if (errEl) {
+                errEl.textContent = msg;
+                errEl.style.display = 'block';
+            } else {
+                alert(msg);
+            }
+        }
+    } catch (e) {
+        const msg = 'Error deleting user';
+        if (errEl) {
+            errEl.textContent = msg;
+            errEl.style.display = 'block';
+        } else {
+            alert(msg);
+        }
+    }
+}
+
+async function resetUserDetailPassword() {
+    const password = document.getElementById('reset-user-detail-password').value;
+    const errEl = document.getElementById('user-detail-reset-error');
+
+    if (!password || password.length < 6) {
+        errEl.textContent = 'Password must be at least 6 characters.';
+        errEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const r = await fetch('/config/users/' + resetUserDetailId + '/reset-password', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({password})
+        });
+        const d = await r.json();
+        if (d.success) {
+            closeUserDetailModal();
+        } else {
+            errEl.textContent = d.error || 'Error resetting password';
+            errEl.style.display = 'block';
+        }
+    } catch (e) {
+        errEl.textContent = 'Error resetting password';
+        errEl.style.display = 'block';
+    }
+}
+</script>
+{% endblock %}
+

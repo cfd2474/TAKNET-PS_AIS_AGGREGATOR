@@ -1,0 +1,533 @@
+{% extends "base.html" %}
+{% block page_title %}Services{% endblock %}
+
+{% block content %}
+
+<!-- ADSBHub settings -->
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <div>
+            <h3>ADSBHub</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Feed SBS to ADSBHub and/or receive merged aircraft. Set CLIENTKEY for feed.</p>
+        </div>
+        <button class="btn btn-primary" id="adsbhub-save-btn" onclick="saveAdsbhub()" style="white-space:nowrap;">Save</button>
+    </div>
+    <div style="padding:0 20px 20px;">
+        <div style="margin-bottom:16px;">
+            <label for="adsbhub-client-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Station dynamic IP key (CLIENTKEY)</label>
+            <input type="password" id="adsbhub-client-key" class="form-control" placeholder="Paste key from ADSBHub Settings → New Station"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">Required for feeding. Get it from ADSBHub after adding your station; add your server IP in Data Access for receive.</p>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="adsbhub-feed" class="toggle">
+                <span>Feed to ADSBHub</span>
+            </label>
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="adsbhub-receive" class="toggle">
+                <span>Receive from ADSBHub</span>
+            </label>
+        </div>
+        <p id="adsbhub-msg" style="font-size:12px;color:var(--text-muted);margin-top:12px;margin-bottom:0;"></p>
+    </div>
+</div>
+
+<!-- Resend transactional mail settings -->
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <div>
+            <h3>Resend Mail</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+                Transactional email for admin alerts and password reset.
+            </p>
+        </div>
+        <button class="btn btn-primary" id="resend-save-btn" onclick="saveResendMail()" style="white-space:nowrap;">Save</button>
+    </div>
+    <div style="padding:0 20px 20px;">
+        <div style="margin-bottom:16px;">
+            <label for="resend-api-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Resend API key</label>
+            <input type="password" id="resend-api-key" class="form-control"
+                   placeholder="Paste your Resend API key"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p id="resend-msg" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="resend-enabled" class="toggle">
+                <span>Enable email notifications</span>
+            </label>
+        </div>
+
+        <div style="margin-top:16px;">
+            <label for="resend-pending-user-recipient-input" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">
+                New/Pending User Notification Recipient(s)
+            </label>
+
+            <div style="display:flex;gap:8px;align-items:center;">
+                <input type="email" id="resend-pending-user-recipient-input" class="form-control"
+                       placeholder="Add email address"
+                       style="max-width:420px;font-family:monospace;font-size:13px;"
+                       autocomplete="off">
+                <button class="btn btn-sm" type="button" onclick="addResendPendingUserRecipient()">
+                    Add
+                </button>
+            </div>
+
+            <div id="resend-pending-user-recipient-list" style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;"></div>
+            <p id="resend-pending-user-recipient-msg" style="font-size:11px;color:var(--text-muted);margin-top:8px;margin-bottom:0;"></p>
+        </div>
+    </div>
+</div>
+
+<!-- CoT push (TLS chunk size + optional fast XML builder) -->
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <div>
+            <h3>CoT push</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">TLS send chunking and optional string-template CoT XML (same semantics as the default builder; can lower CPU on large feeds). One save updates <code>.env</code> and restarts the dashboard once.</p>
+        </div>
+        <button class="btn btn-primary" id="cot-push-save-btn" onclick="saveCotPushSettings()" style="white-space:nowrap;">Save</button>
+    </div>
+    <div style="padding:0 20px 20px;">
+        <label for="cot-send-chunk-messages" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Messages per send (<code>COT_SEND_CHUNK_MESSAGES</code>)</label>
+        <input type="number" id="cot-send-chunk-messages" class="form-control" min="1" max="5000" step="1"
+               style="max-width:160px;font-family:monospace;font-size:14px;" autocomplete="off">
+        <div style="margin-top:14px;">
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="cot-xml-use-template" class="toggle">
+                <span>Fast XML template builder (<code>COT_XML_USE_TEMPLATE</code>)</span>
+            </label>
+            <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0 28px;">Off = ElementTree (default). On = same wire format; COTProxy transforms, remarks, icons, and video URLs are supported.</p>
+        </div>
+        <p id="cot-push-msg" style="font-size:12px;color:var(--text-muted);margin-top:12px;margin-bottom:0;"></p>
+    </div>
+</div>
+
+<!-- Restart All card -->
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <div>
+            <h3>Soft Reset</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Restart all TAKNET services without rebuilding images.</p>
+        </div>
+        <button class="btn btn-danger" id="restart-all-btn" onclick="restartAll()" style="white-space:nowrap;">Restart All Services</button>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3>Docker Containers</h3>
+        <button class="btn btn-sm" onclick="loadContainers()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Service</th>
+                    <th>Image</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th style="text-align:right;">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="container-table">
+                <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:40px;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Restart All Modal -->
+<div class="modal-overlay" id="restart-modal">
+    <div class="modal" style="max-width:480px;">
+        <div class="modal-header">
+            <h3 id="restart-modal-title">Restarting All Services</h3>
+        </div>
+        <div class="modal-body">
+            <div id="restart-status-bar" style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);border-radius:6px;padding:10px 14px;font-size:13px;color:var(--accent);margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                <span id="restart-spinner" style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;"></span>
+                <span id="restart-status-msg">Restarting services...</span>
+            </div>
+            <pre id="restart-log" style="font-size:11px;font-family:monospace;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;max-height:50vh;overflow-y:auto;background:var(--bg-primary);padding:12px;border-radius:6px;"></pre>
+            <div style="text-align:right;margin-top:12px;">
+                <button class="btn" id="restart-close-btn" style="display:none;" onclick="closeRestartModal()">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Logs Modal -->
+<div class="modal-overlay" id="logs-modal">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="logs-title">Container Logs</h3>
+            <button class="modal-close" onclick="closeLogs()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="logs-content" style="font-size:11px;font-family:monospace;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow-y:auto;background:var(--bg-primary);padding:12px;border-radius:6px;">Loading...</pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+async function loadAdsbhubSettings() {
+    try {
+        const r = await fetch('/api/settings/adsbhub');
+        const d = await r.json();
+        document.getElementById('adsbhub-feed').checked = !!d.feed_enabled;
+        document.getElementById('adsbhub-receive').checked = !!d.receive_enabled;
+        document.getElementById('adsbhub-client-key').value = d.client_key || '';
+        document.getElementById('adsbhub-msg').textContent = '';
+    } catch (e) {
+        document.getElementById('adsbhub-msg').textContent = 'Could not load ADSBHub settings.';
+    }
+}
+
+let resendPendingUserRecipients = [];
+
+function renderResendPendingUserRecipients() {
+    const listEl = document.getElementById('resend-pending-user-recipient-list');
+    const msgEl = document.getElementById('resend-pending-user-recipient-msg');
+    if (!listEl || !msgEl) return;
+
+    listEl.innerHTML = '';
+
+    resendPendingUserRecipients.forEach((email, idx) => {
+        const chip = document.createElement('div');
+        chip.style.display = 'inline-flex';
+        chip.style.alignItems = 'center';
+        chip.style.gap = '8px';
+        chip.style.background = 'rgba(59,130,246,0.12)';
+        chip.style.border = '1px solid rgba(59,130,246,0.25)';
+        chip.style.color = 'var(--accent)';
+        chip.style.padding = '6px 10px';
+        chip.style.borderRadius = '999px';
+        chip.style.fontSize = '12px';
+
+        const txt = document.createElement('span');
+        txt.textContent = email;
+        chip.appendChild(txt);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = '×';
+        btn.style.border = 'none';
+        btn.style.background = 'transparent';
+        btn.style.color = 'var(--accent)';
+        btn.style.cursor = 'pointer';
+        btn.style.fontSize = '16px';
+        btn.style.lineHeight = '16px';
+        btn.onclick = () => removeResendPendingUserRecipient(idx);
+        chip.appendChild(btn);
+
+        listEl.appendChild(chip);
+    });
+
+    msgEl.textContent = resendPendingUserRecipients.length === 0
+        ? 'No recipients configured yet.'
+        : '';
+}
+
+function addResendPendingUserRecipient() {
+    const inp = document.getElementById('resend-pending-user-recipient-input');
+    const msgEl = document.getElementById('resend-pending-user-recipient-msg');
+    if (!inp || !msgEl) return;
+
+    const raw = (inp.value || '').trim();
+    if (!raw) return;
+    // Minimal validation; Resend will reject invalid addresses anyway.
+    if (!raw.includes('@') || raw.length < 6) {
+        msgEl.textContent = 'Please enter a valid email address.';
+        return;
+    }
+
+    const email = raw.toLowerCase();
+    if (resendPendingUserRecipients.includes(email)) {
+        msgEl.textContent = 'That email is already added.';
+        inp.value = '';
+        return;
+    }
+
+    resendPendingUserRecipients.push(email);
+    inp.value = '';
+    msgEl.textContent = '';
+    renderResendPendingUserRecipients();
+}
+
+function removeResendPendingUserRecipient(idx) {
+    resendPendingUserRecipients.splice(idx, 1);
+    renderResendPendingUserRecipients();
+}
+
+async function saveAdsbhub() {
+    const feed = document.getElementById('adsbhub-feed').checked;
+    const receive = document.getElementById('adsbhub-receive').checked;
+    const clientKey = document.getElementById('adsbhub-client-key').value.trim();
+    const btn = document.getElementById('adsbhub-save-btn');
+    const msgEl = document.getElementById('adsbhub-msg');
+    btn.disabled = true;
+    msgEl.textContent = 'Saving and restarting ADSBHub services...';
+    msgEl.style.color = 'var(--accent)';
+    try {
+        const r = await fetch('/api/settings/adsbhub', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ feed_enabled: feed, receive_enabled: receive, client_key: clientKey })
+        });
+        const d = await r.json();
+        if (d.success) {
+            msgEl.textContent = d.message || 'Saved.';
+            msgEl.style.color = 'var(--green)';
+            loadContainers();
+        } else {
+            msgEl.textContent = d.error || 'Save failed.';
+            msgEl.style.color = 'var(--red)';
+        }
+    } catch (e) {
+        msgEl.textContent = 'Error: ' + e.message;
+        msgEl.style.color = 'var(--red)';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function loadResendMailSettings() {
+    try {
+        const r = await fetch('/api/settings/mail');
+        const d = await r.json();
+        document.getElementById('resend-enabled').checked = !!d.enabled;
+        document.getElementById('resend-api-key').value = '';
+        if (d.api_key_present) {
+            document.getElementById('resend-msg').textContent = 'API key is stored. Leave input blank to keep it.';
+        } else {
+            document.getElementById('resend-msg').textContent = 'No API key stored yet.';
+        }
+
+        resendPendingUserRecipients = Array.isArray(d.pending_user_recipients) ? d.pending_user_recipients : [];
+        renderResendPendingUserRecipients();
+    } catch (e) {
+        document.getElementById('resend-msg').textContent = 'Could not load Resend settings.';
+    }
+}
+
+async function saveResendMail() {
+    const btn = document.getElementById('resend-save-btn');
+    const msgEl = document.getElementById('resend-msg');
+    const enabled = document.getElementById('resend-enabled').checked;
+    const apiKey = document.getElementById('resend-api-key').value.trim();
+
+    btn.disabled = true;
+    msgEl.textContent = 'Saving mail settings...';
+    msgEl.style.color = 'var(--accent)';
+
+    try {
+        const r = await fetch('/api/settings/mail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled, api_key: apiKey, pending_user_recipients: resendPendingUserRecipients }),
+        });
+        const d = await r.json();
+        if (d.success) {
+            msgEl.textContent = d.message || 'Saved.';
+            msgEl.style.color = 'var(--green)';
+            // Refresh without requiring a page reload.
+            await loadResendMailSettings();
+        } else {
+            msgEl.textContent = d.error || 'Save failed.';
+            msgEl.style.color = 'var(--red)';
+        }
+    } catch (e) {
+        msgEl.textContent = 'Error: ' + e.message;
+        msgEl.style.color = 'var(--red)';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function loadCotPushSettings() {
+    const msgEl = document.getElementById('cot-push-msg');
+    const inp = document.getElementById('cot-send-chunk-messages');
+    const tpl = document.getElementById('cot-xml-use-template');
+    try {
+        const r = await fetch('/api/settings/cot-push');
+        const d = await r.json();
+        inp.value = String(d.chunk_messages != null ? d.chunk_messages : 200);
+        tpl.checked = !!d.use_template;
+        msgEl.textContent = '';
+    } catch (e) {
+        msgEl.textContent = 'Could not load CoT push settings.';
+    }
+}
+
+async function saveCotPushSettings() {
+    const btn = document.getElementById('cot-push-save-btn');
+    const msgEl = document.getElementById('cot-push-msg');
+    const raw = document.getElementById('cot-send-chunk-messages').value.trim();
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 5000) {
+        msgEl.textContent = 'Enter an integer from 1 to 5000 for messages per send.';
+        msgEl.style.color = 'var(--red)';
+        return;
+    }
+    const useTemplate = document.getElementById('cot-xml-use-template').checked;
+    btn.disabled = true;
+    msgEl.textContent = 'Saving and restarting dashboard...';
+    msgEl.style.color = 'var(--accent)';
+    try {
+        const r = await fetch('/api/settings/cot-push', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chunk_messages: n, use_template: useTemplate }),
+        });
+        const d = await r.json();
+        if (d.success) {
+            msgEl.textContent = d.message || 'Saved.';
+            msgEl.style.color = 'var(--green)';
+            loadContainers();
+        } else {
+            msgEl.textContent = d.error || 'Save failed.';
+            msgEl.style.color = 'var(--red)';
+        }
+    } catch (e) {
+        msgEl.textContent = 'Error: ' + e.message;
+        msgEl.style.color = 'var(--red)';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// Allow quick entry: press Enter to add recipient.
+document.getElementById('resend-pending-user-recipient-input')?.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        addResendPendingUserRecipient();
+    }
+});
+
+async function loadContainers() {
+    try {
+        const r = await fetch('/api/docker/containers');
+        const d = await r.json();
+        const containers = d.containers || [];
+        const tbody = document.getElementById('container-table');
+
+        if (containers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:40px;">No TAKNET containers found. Is Docker accessible?</td></tr>';
+            return;
+        }
+
+        let html = '';
+        containers.forEach(c => {
+            const statusBadge = c.status === 'running'
+                ? '<span class="badge badge-live">Running</span>'
+                : '<span class="badge badge-offline">' + c.status + '</span>';
+
+            html += '<tr>';
+            html += '<td style="font-weight:500;color:var(--text-primary)">' + c.short_name + '</td>';
+            html += '<td style="font-size:12px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + c.image + '</td>';
+            html += '<td>' + statusBadge + '</td>';
+            html += '<td style="font-size:12px;">' + fmtTime(c.started_at) + '</td>';
+            html += '<td style="text-align:right;">';
+            html += '<button class="btn btn-sm" onclick="showLogs(\'' + c.name + '\')">Logs</button> ';
+            html += '<button class="btn btn-sm" onclick="restartContainer(\'' + c.name + '\')">Restart</button>';
+            html += '</td>';
+            html += '</tr>';
+        });
+        tbody.innerHTML = html;
+    } catch(e) {
+        console.error('Load containers error:', e);
+    }
+}
+
+async function restartAll() {
+    if (!confirm('Restart all TAKNET services? They will be briefly unavailable.')) return;
+
+    document.getElementById('restart-modal-title').textContent = 'Restarting All Services';
+    document.getElementById('restart-spinner').style.display = 'inline-block';
+    document.getElementById('restart-status-bar').style.background = 'rgba(59,130,246,0.08)';
+    document.getElementById('restart-status-bar').style.borderColor = 'rgba(59,130,246,0.2)';
+    document.getElementById('restart-status-msg').style.color = 'var(--accent)';
+    document.getElementById('restart-status-msg').textContent = 'Restarting services...';
+    document.getElementById('restart-log').textContent = '';
+    document.getElementById('restart-close-btn').style.display = 'none';
+    document.getElementById('restart-modal').classList.add('show');
+    document.getElementById('restart-all-btn').disabled = true;
+
+    try {
+        const r = await fetch('/api/docker/restart-all', { method: 'POST' });
+        const d = await r.json();
+
+        if (d.success) {
+            document.getElementById('restart-spinner').style.display = 'none';
+            document.getElementById('restart-modal-title').textContent = 'Restart Complete';
+            document.getElementById('restart-status-bar').style.background = 'rgba(34,197,94,0.08)';
+            document.getElementById('restart-status-bar').style.borderColor = 'rgba(34,197,94,0.2)';
+            document.getElementById('restart-status-msg').style.color = 'var(--green)';
+            document.getElementById('restart-status-msg').textContent = '✓ All services restarted.';
+            document.getElementById('restart-log').textContent = d.output || '';
+            loadContainers();
+        } else {
+            throw new Error(d.error || 'Unknown error');
+        }
+    } catch(e) {
+        document.getElementById('restart-spinner').style.display = 'none';
+        document.getElementById('restart-modal-title').textContent = 'Restart Failed';
+        document.getElementById('restart-status-bar').style.background = 'rgba(239,68,68,0.08)';
+        document.getElementById('restart-status-bar').style.borderColor = 'rgba(239,68,68,0.2)';
+        document.getElementById('restart-status-msg').style.color = 'var(--red)';
+        document.getElementById('restart-status-msg').textContent = '✗ ' + e.message;
+    } finally {
+        document.getElementById('restart-close-btn').style.display = 'block';
+        document.getElementById('restart-all-btn').disabled = false;
+    }
+}
+
+function closeRestartModal() {
+    document.getElementById('restart-modal').classList.remove('show');
+}
+
+async function restartContainer(name) {
+    if (!confirm('Restart ' + name + '?')) return;
+    try {
+        const r = await fetch('/api/docker/containers/' + name + '/restart', { method: 'POST' });
+        const d = await r.json();
+        alert(d.message || 'Done');
+        loadContainers();
+    } catch(e) { alert('Error: ' + e); }
+}
+
+async function showLogs(name) {
+    document.getElementById('logs-title').textContent = name + ' — Logs';
+    document.getElementById('logs-content').textContent = 'Loading...';
+    document.getElementById('logs-modal').classList.add('show');
+
+    try {
+        const r = await fetch('/api/docker/containers/' + name + '/logs?tail=200');
+        const d = await r.json();
+        document.getElementById('logs-content').textContent = d.logs || 'No logs available';
+        const el = document.getElementById('logs-content');
+        el.scrollTop = el.scrollHeight;
+    } catch(e) {
+        document.getElementById('logs-content').textContent = 'Error: ' + e;
+    }
+}
+
+function closeLogs() {
+    document.getElementById('logs-modal').classList.remove('show');
+}
+
+document.getElementById('logs-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeLogs();
+});
+
+loadAdsbhubSettings();
+loadResendMailSettings();
+loadCotPushSettings();
+loadContainers();
+setInterval(loadContainers, 30000);
+</script>
+{% endblock %}

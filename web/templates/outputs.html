@@ -1,0 +1,1382 @@
+{% extends "base.html" %}
+{% block page_title %}Outputs{% endblock %}
+
+{% block content %}
+
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+    <div>
+        <h2 style="font-size:18px;font-weight:600;margin:0;">Outputs</h2>
+        <p style="font-size:13px;color:var(--text-muted);margin:2px 0 0;">Outgoing data feeds you manage</p>
+    </div>
+    <button class="btn btn-primary" onclick="openCreateModal()" style="font-size:13px;">+ Add Output</button>
+</div>
+
+<div class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Mode</th>
+                    <th>Key</th>
+                    <th>Key Status</th>
+                    <th>Created</th>
+                    <th style="text-align:center;">Enabled</th>
+                    {% if current_user.role == 'admin' %}<th>Owner</th>{% endif %}
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="outputs-tbody">
+                <tr><td colspan="{% if current_user.role == 'admin' %}9{% else %}8{% endif %}" style="text-align:center;color:var(--text-muted);padding:30px;">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Output guidance -->
+<div class="card" style="margin-top:16px;">
+    <div class="card-header">
+        <h3>Output Types and Controls</h3>
+        <span style="font-size:12px;color:var(--text-muted);">Guidance</span>
+    </div>
+    <div style="padding:0 20px 20px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:12px;">
+            <div style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.35);border-radius:8px;padding:12px;">
+                <div style="font-size:12px;font-weight:600;color:#93c5fd;margin-bottom:4px;">ADSB Direct</div>
+                <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.45;">Keyed URL output for plugin use. Supports include-network traffic and altitude threshold filters.</p>
+            </div>
+            <div style="background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.35);border-radius:8px;padding:12px;">
+                <div style="font-size:12px;font-weight:600;color:var(--cyan);margin-bottom:4px;">JSON</div>
+                <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.45;">Keyed JSON stream/range access for integrations that consume structured aircraft data.</p>
+            </div>
+            <div style="background:rgba(249,115,22,0.12);border:1px solid rgba(249,115,22,0.35);border-radius:8px;padding:12px;">
+                <div style="font-size:12px;font-weight:600;color:var(--orange);margin-bottom:4px;">Beast RAW</div>
+                <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.45;">TCP beast stream output for decoder/client software using Beast protocol.</p>
+            </div>
+            <div style="background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.35);border-radius:8px;padding:12px;">
+                <div style="font-size:12px;font-weight:600;color:var(--green);margin-bottom:4px;">CoT</div>
+                <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.45;">Cursor on Target output with optional COTProxy transforms for per-aircraft mapping.</p>
+            </div>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.6;">
+            <strong style="color:var(--text-secondary);">Basic controls:</strong>
+            use <strong>Enable</strong> to pause/resume an output, <strong>Edit</strong> to update config/filters, and <strong>Regen Key</strong> to rotate credentials.
+            API outputs with generated keys show key details in the output modal, including copy controls.
+        </p>
+        <div style="margin-top:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;">JSON Helper Guidance</div>
+            <ul style="margin:0;padding-left:18px;font-size:12px;color:var(--text-muted);line-height:1.5;">
+                <li><code>/api/outputs/stream/&lt;key&gt;</code> - Full live aircraft stream for the JSON output key.</li>
+                <li><code>/api/outputs/range/point/&lt;lat&gt;/&lt;lon&gt;/&lt;radius_nm&gt;?key=&lt;key&gt;</code> - Aircraft inside a point/radius query (max 250 nm).</li>
+                <li><code>/api/outputs/json/&lt;key&gt;/v2/all</code> - airplanes.live-style full dataset for this keyed output.</li>
+                <li><code>/api/outputs/json/&lt;key&gt;/v2/health</code> - Compatibility health check for key and response timing.</li>
+                <li><code>/api/outputs/json/&lt;key&gt;/v2/hex/&lt;hex&gt;</code>, <code>/callsign/&lt;callsign&gt;</code>, <code>/reg/&lt;reg&gt;</code>, <code>/type/&lt;type&gt;</code>, <code>/squawk/&lt;squawk&gt;</code> - Filter by aircraft identity fields.</li>
+                <li><code>/api/outputs/json/&lt;key&gt;/v2/mil</code>, <code>/ladd</code>, <code>/pia</code> - Filter by common airplanes.live-style groupings.</li>
+                <li><code>/api/outputs/json/&lt;key&gt;/v2/point/&lt;lat&gt;/&lt;lon&gt;/&lt;radius_nm&gt;</code> - Keyed point/radius path variant for compatibility clients.</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- Create / Edit Modal -->
+<div class="modal-overlay" id="output-modal">
+    <div class="modal" style="max-width:560px;">
+        <div class="modal-header">
+            <h3 id="modal-title">Add Output</h3>
+            <button class="modal-close" onclick="closeOutputModal()">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <input type="hidden" id="modal-output-id" value="">
+            <div class="form-group" style="margin-bottom:14px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                    <input type="checkbox" id="modal-enabled" checked>
+                    <span>Enable this output</span>
+                </label>
+                <p style="font-size:12px;color:var(--text-muted);margin:4px 0 0 26px;">When disabled, the output is paused — no data is sent and API keys will not authenticate.</p>
+            </div>
+            <div class="card-grid card-grid-2" style="gap:12px;">
+                <div class="form-group">
+                    <label>Name</label>
+                    <input class="form-control" id="modal-name" placeholder="e.g. TAK Server Feed">
+                </div>
+                <div class="form-group">
+                    <label>Output format</label>
+                    <select class="form-control" id="modal-type" onchange="onTypeChange()">
+                        <option value="json">JSON</option>
+                        <option value="adsb_direct">ADSB Direct</option>
+                        <option value="beast_raw">Beast RAW</option>
+                        <option value="cot">CoT</option>
+                    </select>
+                </div>
+                <div class="form-group" id="json-mode-group" style="display:none;">
+                    <label>JSON API mode</label>
+                    <select class="form-control" id="modal-json-mode" onchange="onJsonModeChange()">
+                        <option value="stream">Stream — full aircraft list at /api/outputs/stream/&lt;key&gt;</option>
+                        <option value="range_api">Range API — center &amp; radius in URL at /api/outputs/range/point/...</option>
+                    </select>
+                </div>
+                <div class="form-group" id="cot-options" style="display:none;">
+                    <p style="font-size:12px;color:var(--text-muted);margin:0;">
+                        <strong style="color:var(--text-primary);">COTProxy is enabled</strong> for CoT outputs.
+                    </p>
+                    <p style="font-size:12px;color:var(--text-muted);margin:4px 0 0;">Configure transforms on the COTProxy config page (per-hex overrides).</p>
+                </div>
+                <div class="form-group" id="mode-group">
+                    <label>Mode</label>
+                    <select class="form-control" id="modal-mode" onchange="onModeChange()">
+                        <option value="api">API (inbound, key-authenticated)</option>
+                        <option value="push">Push (outbound to URL/host)</option>
+                    </select>
+                </div>
+                <div class="form-group" id="key-type-group">
+                    <label>Key Type</label>
+                    <select class="form-control" id="modal-key-type">
+                        <option value="single_use">Single-Use — one active connection (beast) or unlimited REST calls; key shows as "used" after first beast connection</option>
+                        <option value="durable">Durable — no connection limits, never consumed; key stays "ready" indefinitely</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Push config (shown when mode=push; for CoT we show cot-dest-config instead) -->
+            <div id="push-config" style="display:none;margin-top:4px;">
+                <div class="form-group" id="push-url-group">
+                    <label id="push-url-label">Push URL</label>
+                    <input class="form-control" id="modal-push-url" placeholder="tcp://host:8087 or udp://239.2.3.1:6969 or http://...">
+                </div>
+                <div class="form-group" id="push-interval-group">
+                    <label>Push Interval (seconds)</label>
+                    <input class="form-control" id="modal-push-interval" type="number" min="1" value="5">
+                </div>
+            </div>
+
+            <!-- CoT push config: TLS only (PyTAK tls://); server address + port -->
+            <div id="cot-dest-config" style="display:none;margin-top:4px;">
+                <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.45;">
+                    <strong style="color:var(--text-primary);">TLS only</strong> — encrypted connection to your TAK Server (client certificate required). Do not include <code>http://</code> or <code>https://</code> in the server address; use hostname or IP and set the port below.
+                </p>
+                <div class="form-group">
+                    <label>Server address</label>
+                    <input type="text" class="form-control" id="modal-cot-host" placeholder="takserver.example.com or 10.0.0.5" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>Port</label>
+                    <input type="number" class="form-control" id="modal-cot-port" placeholder="8089" min="1" max="65535" step="1" style="max-width:120px;">
+                </div>
+                <div id="cot-tls-paused-banner" style="display:none;margin-top:12px;padding:10px 12px;background:rgba(239,68,68,0.12);border:1px solid var(--red);border-radius:6px;font-size:12px;color:var(--text-secondary);line-height:1.45;">
+                    <strong style="color:var(--red);">TLS push paused</strong> — the last TCP/TLS attempt failed. This output is skipped until you correct the server, port, or client certificate and run <strong>Test TLS connection</strong> successfully.
+                </div>
+                <div style="margin-top:12px;display:flex;align-items:center;flex-wrap:wrap;gap:10px;">
+                    <button type="button" class="btn btn-primary" id="cot-test-tls-btn" style="font-size:12px;">Test TLS connection</button>
+                    <span id="cot-test-tls-msg" style="font-size:12px;"></span>
+                </div>
+            </div>
+
+            <!-- CoT push TLS certificates -->
+            <div id="cot-certs-section" style="display:none;margin-top:12px;padding:12px;background:var(--bg-secondary);border-radius:8px;">
+                <h4 style="font-size:13px;margin:0 0 8px;">Client certificate and private key</h4>
+                <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;">Get these from your TAK Server. When you are assigned to a group or channel, the server may give you a <code>.p12</code> (or <code>.pfx</code>) file — that file contains both the certificate and the private key. You can upload the .p12 here (we extract cert and key), or upload two separate .pem files:</p>
+                <ul style="font-size:12px;color:var(--text-muted);margin:0 0 10px;padding-left:18px;">
+                    <li><strong>Certificate</strong> — the public client cert. Usually a <code>.pem</code> or <code>.crt</code> file; inside it says <code>BEGIN CERTIFICATE</code>. This identifies your connection to the server (e.g. which group/channel).</li>
+                    <li><strong>Private key</strong> — the secret key that pairs with the certificate. Usually a <code>.pem</code> or <code>.key</code> file; inside it says <code>BEGIN PRIVATE KEY</code> or <code>BEGIN RSA PRIVATE KEY</code>. Never share this file.</li>
+                </ul>
+                <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;">Stored encrypted; only you can add or replace. No one can view the files after upload.</p>
+                <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;"><strong>TAK Server admin:</strong> The certificate must be assigned to the correct group (UserManager <code>certmod -g</code>) and that group must be in the data feed’s <code>&lt;filtergroup&gt;</code> in CoreConfig.xml — otherwise messages can be dropped. See project <code>COT_PUSH_COMPLIANCE.md</code>.</p>
+                <div id="cot-certs-status" style="display:none;margin-bottom:10px;">
+                    <span id="cot-certs-status-text" style="font-size:13px;"></span>
+                    <button type="button" class="btn" id="cot-certs-replace-btn" style="font-size:12px;margin-left:8px;display:none;">Replace certificate</button>
+                </div>
+                <div id="cot-certs-upload" style="transition:opacity 0.2s;">
+                    <p style="font-size:12px;font-weight:600;color:var(--text-primary);margin:0 0 10px;">Use <strong>one option only</strong> — either cert + key (two files) or a single .p12 file.</p>
+
+                    <div style="margin-bottom:14px;padding:10px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;">
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">Option 1: Certificate and key (two files)</div>
+                        <div class="form-group" style="margin-bottom:6px;">
+                            <label style="font-size:12px;">Certificate (.pem or .crt)</label>
+                            <input type="file" id="cot-cert-file" accept=".pem,.crt" class="form-control" style="padding:4px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label style="font-size:12px;">Private key (.pem or .key)</label>
+                            <input type="file" id="cot-key-file" accept=".pem,.key" class="form-control" style="padding:4px;">
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom:14px;padding:10px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;">
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">Option 2: Single .p12/.pfx file</div>
+                        <div class="form-group" style="margin-bottom:6px;">
+                            <label style="font-size:12px;">.p12 or .pfx file (we extract cert and key)</label>
+                            <input type="file" id="cot-p12-file" accept=".p12,.pfx" class="form-control" style="padding:4px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label style="font-size:12px;">P12 password (leave blank if none)</label>
+                            <input type="password" id="cot-p12-password" class="form-control" placeholder="Password for the .p12 file" autocomplete="off" style="max-width:240px;">
+                        </div>
+                    </div>
+
+                    <button type="button" class="btn btn-primary" id="cot-certs-upload-btn" style="font-size:12px;">Upload certificate and key</button>
+                    <span id="cot-certs-upload-msg" style="font-size:12px;margin-left:8px;"></span>
+                </div>
+            </div>
+
+            <!-- API config info (shown when mode=api) -->
+            <div id="api-config" style="margin-top:4px;">
+                <div id="api-key-detail-wrap" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">API Key</strong>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;">
+                        <code id="api-key-detail-val" style="color:var(--green);font-size:12px;word-break:break-all;"></code>
+                        <button type="button" class="btn btn-sm" onclick="copyApiKeyDetail()" style="font-size:11px;padding:4px 8px;">Copy</button>
+                    </div>
+                    <div id="api-key-detail-copy-msg" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
+                </div>
+                <div id="api-info-json-stream" style="background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">JSON Stream</strong> — External services call:<br>
+                    <code style="color:var(--green);font-size:12px;">GET /api/outputs/stream/&lt;key&gt;</code><br>
+                    Returns current aircraft.json from this aggregator.<br>
+                    <span style="font-size:12px;color:var(--text-muted);">airplanes.live-style private compatibility is also available at <code>/api/outputs/json/&lt;key&gt;/v2/...</code> (all, hex, callsign, reg, type, squawk, mil, ladd, pia, point, health).</span>
+                </div>
+                <div id="api-info-json-range" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">JSON Range API</strong> — Call with center point and radius in the URL. Key in query or header.<br>
+                    <code style="color:var(--green);font-size:12px;">GET /api/outputs/range/point/&lt;lat&gt;/&lt;lon&gt;/&lt;radius_nm&gt;?key=&lt;key&gt;</code><br>
+                    Max radius 250 nm. Respects &quot;Include Network ADSB Traffic&quot; below.<br>
+                    <span style="font-size:12px;color:var(--text-muted);">airplanes.live-style private compatibility is also available at <code>/api/outputs/json/&lt;key&gt;/v2/...</code>.</span>
+                </div>
+                <div id="api-info-adsb-direct" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">ADSB Direct</strong> — Key is embedded in URL path; query by center point and radius.<br>
+                    <code style="color:var(--green);font-size:12px;">GET /api/outputs/direct/&lt;key&gt;/point</code><br>
+                    Plugin appends center/range path values. Respects Include Network Traffic and ADSB Direct altitude thresholds.
+                </div>
+                <div id="adsb-direct-url-wrap" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">ADSB Direct URL</strong><br>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;">
+                        <code id="adsb-direct-url-val" style="color:var(--green);font-size:12px;word-break:break-all;"></code>
+                        <button type="button" class="btn btn-sm" id="adsb-direct-url-copy-btn" onclick="copyAdsbDirectUrl()" style="font-size:11px;padding:4px 8px;">Copy</button>
+                    </div>
+                    <div id="adsb-direct-url-copy-msg" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
+                    Base URL only; plugin appends values after <code>/point</code>.
+                </div>
+                <div id="api-info-beast" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">Beast Raw Listener</strong> — Clients connect to:<br>
+                    <code style="color:var(--green);font-size:12px;">TCP port 30005</code><br>
+                    Send key as first line (<code>key\n</code>), then receive beast stream.
+                    Multiple simultaneous connections supported.
+                </div>
+                <div id="api-info-cot" style="display:none;background:var(--bg-secondary);border-radius:8px;padding:12px;font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    <strong style="color:var(--text-primary);">CoT output</strong> — Aircraft are sent as Cursor on Target. Use push mode to send to a TAK Server or multicast. When COTProxy is enabled, configure transforms per aircraft (hex) on the COTProxy config page.
+                </div>
+            </div>
+
+            <!-- Data filters: apply to JSON, Beast Raw, and CoT -->
+            <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+                <h4 style="font-size:13px;margin:0 0 12px;color:var(--text-secondary);">Data filters</h4>
+
+                <div class="form-group" style="margin-bottom:14px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="filter-include-network-adsb">
+                        <span>Include Network ADSB Traffic</span>
+                    </label>
+                    <p style="font-size:12px;color:var(--text-muted);margin:4px 0 0;">When checked, network traffic (e.g. ADSBHub) is included. When unchecked, only direct feeder traffic is sent. Applied to JSON and ADSB Direct outputs; Beast Raw uses a single stream and cannot filter by source.</p>
+                </div>
+
+                <div id="adsb-direct-alt-section" class="form-group" style="display:none;margin-bottom:14px;">
+                    <label style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;display:block;">ADSB Direct altitude thresholds (feet MSL)</label>
+                    <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px;">Optional: leave blank to disable min/max altitude filtering.</p>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:320px;">
+                        <div>
+                            <label style="font-size:11px;">Minimum altitude</label>
+                            <input type="number" class="form-control" id="adsb-direct-min-alt" min="0" max="40000" step="100" placeholder="blank">
+                        </div>
+                        <div>
+                            <label style="font-size:11px;">Maximum altitude</label>
+                            <input type="number" class="form-control" id="adsb-direct-max-alt" min="0" max="40000" step="100" placeholder="blank">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Range limits (location: lat, lon, radius nm — max 250 nm); hidden for Range API type -->
+                <div id="filter-range-section" class="form-group" style="margin-bottom:14px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="filter-range-enable">
+                        <span>Enable Range Limits</span>
+                    </label>
+                    <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">Only include aircraft within radius (nm) of a point. Same concept as REST <code>/v2/point/&lt;lat&gt;/&lt;lon&gt;/&lt;radius_nm&gt;</code>. Max 250 nm.</p>
+                    <div id="filter-range-fields" style="display:none;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end;">
+                        <div class="form-group" style="margin:0;">
+                            <label style="font-size:11px;">Latitude</label>
+                            <input type="text" class="form-control" id="filter-range-lat" placeholder="DD.DDDD">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label style="font-size:11px;">Longitude</label>
+                            <input type="text" class="form-control" id="filter-range-lon" placeholder="-DDD.DDDD">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label style="font-size:11px;">Radius (nm, max 250)</label>
+                            <input type="number" class="form-control" id="filter-range-nm" placeholder="RANGE in NM" min="0" max="250" step="1">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Elevation filter (MSL ft, 0–40,000); hidden for Range API type -->
+                <div id="filter-elevation-section" class="form-group" style="margin-bottom:0;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="filter-elevation-enable">
+                        <span>Enable Elevation Filter</span>
+                    </label>
+                    <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">Only include aircraft within min/max altitude (feet MSL). Range 0–40,000 ft.</p>
+                    <div id="filter-elevation-fields" style="display:none;">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                            <div>
+                                <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px;cursor:pointer;">
+                                    <input type="checkbox" id="filter-elevation-no-min">
+                                    <span>No Minimum</span>
+                                </label>
+                                <div class="form-group" style="margin-bottom:6px;">
+                                    <input type="number" class="form-control" id="filter-elevation-min" placeholder="0" min="0" max="40000" step="100" style="max-width:120px;">
+                                </div>
+                                <input type="range" id="filter-elevation-min-slider" min="0" max="40000" value="0" step="100" style="width:100%;max-width:200px;">
+                            </div>
+                            <div>
+                                <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px;cursor:pointer;">
+                                    <input type="checkbox" id="filter-elevation-no-max">
+                                    <span>No Maximum</span>
+                                </label>
+                                <div class="form-group" style="margin-bottom:6px;">
+                                    <input type="number" class="form-control" id="filter-elevation-max" placeholder="40000" min="0" max="40000" step="100" style="max-width:120px;">
+                                </div>
+                                <input type="range" id="filter-elevation-max-slider" min="0" max="40000" value="40000" step="100" style="width:100%;max-width:200px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Notes</label>
+                <textarea class="form-control" id="modal-notes" rows="2" placeholder="Optional"></textarea>
+            </div>
+
+            <div id="modal-error" style="display:none;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:10px;font-size:13px;color:var(--red);margin-top:8px;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="closeOutputModal()">Cancel</button>
+                <button class="btn btn-primary" id="modal-save-btn" onclick="saveOutput()">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Key Display Modal (shown once after creation or regen) -->
+<div class="modal-overlay" id="key-modal">
+    <div class="modal" style="max-width:640px;">
+        <div class="modal-header">
+            <h3>API Key Generated</h3>
+            <button class="modal-close" onclick="document.getElementById('key-modal').classList.remove('show')">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.3);border-radius:8px;padding:14px;margin-bottom:16px;">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em;">Your API Key — also visible in the outputs list</div>
+                <code id="key-display" style="font-size:13px;color:var(--green);word-break:break-all;"></code>
+            </div>
+            <div id="key-usage-info" style="font-size:13px;color:var(--text-secondary);"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="copyKey()">Copy Key</button>
+                <button class="btn btn-primary" onclick="document.getElementById('key-modal').classList.remove('show')">Done</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+const userRole = '{{ current_user.role }}';
+
+function applyFilterConfigToPayload(config, errEl) {
+    config.include_network_adsb = document.getElementById('filter-include-network-adsb').checked;
+    const type = document.getElementById('modal-type').value;
+    if (type === 'adsb_direct') {
+        const minRaw = document.getElementById('adsb-direct-min-alt').value.trim();
+        const maxRaw = document.getElementById('adsb-direct-max-alt').value.trim();
+        const minVal = minRaw === '' ? null : parseInt(minRaw, 10);
+        const maxVal = maxRaw === '' ? null : parseInt(maxRaw, 10);
+        if (minVal !== null && (isNaN(minVal) || minVal < 0 || minVal > 40000)) {
+            errEl.textContent = 'ADSB Direct: minimum altitude must be 0–40,000 ft or blank.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        if (maxVal !== null && (isNaN(maxVal) || maxVal < 0 || maxVal > 40000)) {
+            errEl.textContent = 'ADSB Direct: maximum altitude must be 0–40,000 ft or blank.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        if (minVal !== null && maxVal !== null && minVal > maxVal) {
+            errEl.textContent = 'ADSB Direct: minimum altitude must not exceed maximum altitude.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        config.direct_alt_min_ft = minVal;
+        config.direct_alt_max_ft = maxVal;
+        config.range_api = false;
+        return true;
+    }
+    const jsonMode = document.getElementById('modal-json-mode').value;
+    config.range_api = (type === 'json' && jsonMode === 'range_api');
+    if (config.range_api) {
+        return true;
+    }
+    const rangeOn = document.getElementById('filter-range-enable').checked;
+    config.range_limit_enabled = !!rangeOn;
+    if (rangeOn) {
+        const lat = document.getElementById('filter-range-lat').value.trim();
+        const lon = document.getElementById('filter-range-lon').value.trim();
+        const nm = parseFloat(document.getElementById('filter-range-nm').value, 10);
+        if (lat === '' || lon === '') {
+            errEl.textContent = 'Range limits: enter latitude and longitude.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        if (isNaN(nm) || nm < 0 || nm > 250) {
+            errEl.textContent = 'Range limits: radius must be 0–250 nm.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        const latNum = parseFloat(lat, 10);
+        const lonNum = parseFloat(lon, 10);
+        if (isNaN(latNum) || isNaN(lonNum)) {
+            errEl.textContent = 'Range limits: enter valid latitude and longitude.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        config.range_limit_lat = latNum;
+        config.range_limit_lon = lonNum;
+        config.range_limit_nm = nm;
+    }
+    const elevOn = document.getElementById('filter-elevation-enable').checked;
+    config.elevation_filter_enabled = !!elevOn;
+    config.elevation_no_min = !!document.getElementById('filter-elevation-no-min').checked;
+    config.elevation_no_max = !!document.getElementById('filter-elevation-no-max').checked;
+    if (elevOn) {
+        const noMin = config.elevation_no_min;
+        const noMax = config.elevation_no_max;
+        const minVal = noMin ? null : parseInt(document.getElementById('filter-elevation-min').value, 10);
+        const maxVal = noMax ? null : parseInt(document.getElementById('filter-elevation-max').value, 10);
+        if (!noMin && (isNaN(minVal) || minVal < 0 || minVal > 40000)) {
+            errEl.textContent = 'Elevation filter: minimum must be 0–40,000 ft.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        if (!noMax && (isNaN(maxVal) || maxVal < 0 || maxVal > 40000)) {
+            errEl.textContent = 'Elevation filter: maximum must be 0–40,000 ft.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        if (!noMin && !noMax && minVal > maxVal) {
+            errEl.textContent = 'Elevation filter: minimum must not exceed maximum.';
+            errEl.style.display = 'block';
+            return false;
+        }
+        config.elevation_min_ft = noMin ? null : minVal;
+        config.elevation_max_ft = noMax ? null : maxVal;
+    }
+    return true;
+}
+
+function filterRangeEnableChange() {
+    const on = document.getElementById('filter-range-enable').checked;
+    document.getElementById('filter-range-fields').style.display = on ? 'grid' : 'none';
+}
+function filterElevationEnableChange() {
+    const on = document.getElementById('filter-elevation-enable').checked;
+    document.getElementById('filter-elevation-fields').style.display = on ? 'block' : 'none';
+    filterElevationNoMinMaxChange();
+}
+function filterElevationNoMinMaxChange() {
+    const noMin = document.getElementById('filter-elevation-no-min').checked;
+    const noMax = document.getElementById('filter-elevation-no-max').checked;
+    const minInput = document.getElementById('filter-elevation-min');
+    const minSlider = document.getElementById('filter-elevation-min-slider');
+    const maxInput = document.getElementById('filter-elevation-max');
+    const maxSlider = document.getElementById('filter-elevation-max-slider');
+    const grey = '0.5';
+    const normal = '1';
+    minInput.disabled = noMin; minSlider.disabled = noMin;
+    minInput.style.opacity = noMin ? grey : normal; minSlider.style.opacity = noMin ? grey : normal;
+    maxInput.disabled = noMax; maxSlider.disabled = noMax;
+    maxInput.style.opacity = noMax ? grey : normal; maxSlider.style.opacity = noMax ? grey : normal;
+}
+function elevationSliderStep(val) {
+    const n = parseInt(val, 10);
+    if (n > 5000) return Math.round(n / 1000) * 1000;
+    return Math.round(n / 100) * 100;
+}
+function syncElevationMinFromSlider() {
+    const s = document.getElementById('filter-elevation-min-slider');
+    const v = elevationSliderStep(s.value);
+    s.value = v;
+    document.getElementById('filter-elevation-min').value = v;
+}
+function syncElevationMinFromInput() {
+    const i = document.getElementById('filter-elevation-min');
+    let v = parseInt(i.value, 10);
+    if (isNaN(v)) return;
+    v = Math.max(0, Math.min(40000, v));
+    v = elevationSliderStep(v);
+    i.value = v;
+    document.getElementById('filter-elevation-min-slider').value = v;
+}
+function syncElevationMaxFromSlider() {
+    const s = document.getElementById('filter-elevation-max-slider');
+    const v = elevationSliderStep(s.value);
+    s.value = v;
+    document.getElementById('filter-elevation-max').value = v;
+}
+function syncElevationMaxFromInput() {
+    const i = document.getElementById('filter-elevation-max');
+    let v = parseInt(i.value, 10);
+    if (isNaN(v)) return;
+    v = Math.max(0, Math.min(40000, v));
+    v = elevationSliderStep(v);
+    i.value = v;
+    document.getElementById('filter-elevation-max-slider').value = v;
+}
+
+function updateCotTlsPausedBanner() {
+    const banner = document.getElementById('cot-tls-paused-banner');
+    const testBtn = document.getElementById('cot-test-tls-btn');
+    const msg = document.getElementById('cot-test-tls-msg');
+    if (!banner || !testBtn) return;
+    const id = document.getElementById('modal-output-id').value;
+    const destVisible = document.getElementById('cot-dest-config').style.display !== 'none';
+    const cfg = window._outputModalCfg || {};
+    const paused = cfg.cot_tls_paused === true;
+    banner.style.display = (id && destVisible && paused) ? 'block' : 'none';
+    testBtn.disabled = !id;
+    if (msg && !msg.dataset.sticky) msg.textContent = '';
+}
+
+async function testCotTlsConnection() {
+    const id = document.getElementById('modal-output-id').value;
+    const msg = document.getElementById('cot-test-tls-msg');
+    if (!id) {
+        if (msg) { msg.textContent = 'Save the output first.'; msg.style.color = 'var(--yellow)'; }
+        return;
+    }
+    const host = normalizeCotHostInput(document.getElementById('modal-cot-host').value);
+    const port = parseInt(document.getElementById('modal-cot-port').value, 10);
+    let body = {};
+    if (host && !isNaN(port) && port >= 1 && port <= 65535) {
+        body.cot_url = 'tls://' + host + ':' + port;
+    }
+    const btn = document.getElementById('cot-test-tls-btn');
+    if (btn) btn.disabled = true;
+    if (msg) { msg.textContent = 'Testing…'; msg.style.color = 'var(--text-muted)'; msg.dataset.sticky = '1'; }
+    try {
+        const r = await fetch('/api/outputs/' + id + '/cot-test-tls', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (msg) delete msg.dataset.sticky;
+        if (r.ok && d.ok) {
+            if (window._outputModalCfg) {
+                window._outputModalCfg.cot_tls_paused = false;
+                if (body.cot_url) window._outputModalCfg.cot_url = body.cot_url;
+            }
+            msg.textContent = (d.message || 'TLS OK') + (d.cot_url_saved ? ' Address saved to this output.' : '');
+            msg.style.color = 'var(--green)';
+            updateCotTlsPausedBanner();
+            loadOutputs();
+        } else {
+            msg.textContent = d.error || 'Test failed';
+            msg.style.color = 'var(--red)';
+        }
+    } catch (e) {
+        if (msg) delete msg.dataset.sticky;
+        if (msg) { msg.textContent = 'Request failed.'; msg.style.color = 'var(--red)'; }
+    }
+    if (btn) btn.disabled = !document.getElementById('modal-output-id').value;
+}
+
+function normalizeCotHostInput(raw) {
+    var s = (raw || '').trim();
+    for (var i = 0; i < 8; i++) {
+        var before = s;
+        s = s.replace(/^https?:\/\//i, '');
+        s = s.replace(/^(tcp|tls):\/\//i, '');
+        var slash = s.indexOf('/');
+        if (slash >= 0) s = s.slice(0, slash);
+        s = s.trim();
+        if (s === before) break;
+    }
+    return s;
+}
+
+function parseStoredCotUrl(cotUrl) {
+    var host = '';
+    var port = '8089';
+    var u = (cotUrl || '').trim();
+    if (!u) return { host: host, port: port };
+    var rest = u.replace(/^(tcp|tls):\/\//i, '');
+    rest = rest.replace(/^https?:\/\//i, '');
+    var pathIdx = rest.indexOf('/');
+    if (pathIdx >= 0) rest = rest.slice(0, pathIdx);
+    rest = rest.trim();
+    var colon = rest.lastIndexOf(':');
+    if (colon > 0 && /^\d{1,5}$/.test(rest.slice(colon + 1))) {
+        host = normalizeCotHostInput(rest.slice(0, colon));
+        port = rest.slice(colon + 1);
+    } else {
+        host = normalizeCotHostInput(rest);
+    }
+    return { host: host, port: port };
+}
+
+function cotProtocolChange() {
+    const portEl = document.getElementById('modal-cot-port');
+    portEl.placeholder = '8089';
+    if (!portEl.value || portEl.value === '8087' || portEl.value === '8089') portEl.value = '8089';
+    const certSection = document.getElementById('cot-certs-section');
+    const showCerts = document.getElementById('modal-type').value === 'cot' &&
+        document.getElementById('modal-mode').value === 'push';
+    certSection.style.display = showCerts ? 'block' : 'none';
+    updateCotTlsPausedBanner();
+    if (showCerts) {
+        const outputId = document.getElementById('modal-output-id').value;
+        if (outputId) loadCotCertStatus(outputId);
+        else {
+            document.getElementById('cot-certs-status').style.display = 'block';
+            document.getElementById('cot-certs-status-text').textContent = 'Save the output first, then upload certificates below.';
+            document.getElementById('cot-certs-replace-btn').style.display = 'none';
+            document.getElementById('cot-certs-upload').style.display = 'block';
+            setCotCertsSectionEnabled(false);
+        }
+    }
+}
+
+function onJsonModeChange() {
+    const jsonMode = document.getElementById('modal-json-mode').value;
+    const isRangeApi = jsonMode === 'range_api';
+    document.getElementById('api-info-json-stream').style.display = isRangeApi ? 'none' : 'block';
+    document.getElementById('api-info-json-range').style.display = isRangeApi ? 'block' : 'none';
+    document.getElementById('filter-range-section').style.display = isRangeApi ? 'none' : 'block';
+    document.getElementById('filter-elevation-section').style.display = isRangeApi ? 'none' : 'block';
+}
+
+function onTypeChange() {
+    const type = document.getElementById('modal-type').value;
+    const isCot = type === 'cot';
+    const isJson = type === 'json';
+    const isAdsbDirect = type === 'adsb_direct';
+    const modeEl = document.getElementById('modal-mode');
+    const locked = document.getElementById('modal-name').disabled;
+    document.getElementById('mode-group').style.display = isAdsbDirect ? 'none' : 'block';
+    document.getElementById('key-type-group').style.display = isAdsbDirect ? 'none' : ((modeEl.value === 'api') ? 'block' : 'none');
+    if (locked) {
+        modeEl.disabled = true;
+    } else {
+        if (isAdsbDirect) {
+            modeEl.value = 'api';
+            modeEl.disabled = true;
+        } else {
+            modeEl.disabled = false;
+        }
+    }
+    document.getElementById('json-mode-group').style.display = isJson ? 'block' : 'none';
+    document.getElementById('api-info-json-stream').style.display = (isJson && document.getElementById('modal-json-mode').value !== 'range_api') ? 'block' : 'none';
+    document.getElementById('api-info-json-range').style.display = (isJson && document.getElementById('modal-json-mode').value === 'range_api') ? 'block' : 'none';
+    document.getElementById('api-info-adsb-direct').style.display = isAdsbDirect ? 'block' : 'none';
+    document.getElementById('api-info-beast').style.display = (type === 'beast_raw') ? 'block' : 'none';
+    document.getElementById('api-info-cot').style.display    = isCot ? 'block' : 'none';
+    document.getElementById('cot-options').style.display     = isCot ? 'block' : 'none';
+    const isRangeApi = isJson && document.getElementById('modal-json-mode').value === 'range_api';
+    document.getElementById('adsb-direct-alt-section').style.display = isAdsbDirect ? 'block' : 'none';
+    const urlWrap = document.getElementById('adsb-direct-url-wrap');
+    if (urlWrap) urlWrap.style.display = isAdsbDirect ? 'block' : 'none';
+    document.getElementById('filter-range-section').style.display = (isRangeApi || isAdsbDirect) ? 'none' : 'block';
+    document.getElementById('filter-elevation-section').style.display = (isRangeApi || isAdsbDirect) ? 'none' : 'block';
+    const mode = document.getElementById('modal-mode').value;
+    document.getElementById('cot-dest-config').style.display = (isCot && mode === 'push' && !isAdsbDirect) ? 'block' : 'none';
+    document.getElementById('push-url-label').textContent =
+        type === 'beast_raw' ? 'Destination host:port (e.g. 10.0.0.1:30104)' : 'Push URL';
+    document.getElementById('push-url-group').style.display = (isCot || isAdsbDirect) ? 'none' : 'block';
+    document.getElementById('push-interval-group').style.display =
+        (type === 'beast_raw' || type === 'cot' || isAdsbDirect) ? 'none' : 'block';
+    if (isCot && mode === 'push' && !isAdsbDirect) cotProtocolChange();
+    else document.getElementById('cot-certs-section').style.display = 'none';
+    onModeChange();
+}
+
+function onModeChange() {
+    const mode = document.getElementById('modal-mode').value;
+    const type = document.getElementById('modal-type').value;
+    const isAdsbDirect = type === 'adsb_direct';
+    document.getElementById('push-config').style.display    = (mode === 'push' && !isAdsbDirect) ? 'block' : 'none';
+    document.getElementById('push-url-group').style.display = (type === 'cot' || isAdsbDirect) ? 'none' : 'block';
+    document.getElementById('api-config').style.display     = (mode === 'api')  ? 'block' : 'none';
+    if (isAdsbDirect) document.getElementById('key-type-group').style.display = 'none';
+    else document.getElementById('key-type-group').style.display = (mode === 'api')  ? 'block' : 'none';
+    document.getElementById('cot-dest-config').style.display = (type === 'cot' && mode === 'push' && !isAdsbDirect) ? 'block' : 'none';
+    if (type === 'cot' && mode === 'push' && !isAdsbDirect) cotProtocolChange();
+    else document.getElementById('cot-certs-section').style.display = 'none';
+}
+
+async function copyTextToClipboard(text) {
+    const value = (text || '').trim();
+    if (!value) throw new Error('No text to copy');
+    if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (!ok) throw new Error('Clipboard copy failed');
+}
+
+function updateApiKeyDetailDisplay(outputObj) {
+    const wrap = document.getElementById('api-key-detail-wrap');
+    const val = document.getElementById('api-key-detail-val');
+    const msg = document.getElementById('api-key-detail-copy-msg');
+    if (!wrap || !val) return;
+    if (msg) msg.textContent = '';
+    const key = (((outputObj || {}).key_meta || {}).key_display || '').trim();
+    const mode = ((outputObj || {}).mode || '').trim();
+    if (!key || mode !== 'api') {
+        wrap.style.display = 'none';
+        val.textContent = '';
+        return;
+    }
+    val.textContent = key;
+    wrap.style.display = 'block';
+}
+
+async function copyApiKeyDetail() {
+    const el = document.getElementById('api-key-detail-val');
+    const msg = document.getElementById('api-key-detail-copy-msg');
+    if (!el || !el.textContent) return;
+    try {
+        await copyTextToClipboard(el.textContent);
+        if (msg) msg.textContent = 'Copied to clipboard.';
+    } catch (e) {
+        if (msg) msg.textContent = 'Copy failed. Select and copy manually.';
+    }
+}
+
+function updateAdsbDirectUrlDisplay(outputObj, apiKeyOverride) {
+    const wrap = document.getElementById('adsb-direct-url-wrap');
+    const val = document.getElementById('adsb-direct-url-val');
+    const msg = document.getElementById('adsb-direct-url-copy-msg');
+    if (!wrap || !val) return;
+    if (msg) msg.textContent = '';
+    const type = document.getElementById('modal-type').value;
+    if (type !== 'adsb_direct') {
+        wrap.style.display = 'none';
+        val.textContent = '';
+        return;
+    }
+    const key = (apiKeyOverride || ((outputObj || {}).key_meta || {}).key_display || '').trim();
+    if (!key) {
+        wrap.style.display = 'none';
+        val.textContent = '';
+        return;
+    }
+    const base = window.location.origin + '/api/outputs/direct/' + key + '/point';
+    val.textContent = base;
+    wrap.style.display = 'block';
+}
+
+async function copyAdsbDirectUrl() {
+    const el = document.getElementById('adsb-direct-url-val');
+    const msg = document.getElementById('adsb-direct-url-copy-msg');
+    if (!el || !el.textContent) return;
+    try {
+        await copyTextToClipboard(el.textContent);
+        if (msg) msg.textContent = 'Copied to clipboard.';
+    } catch (e) {
+        if (msg) msg.textContent = 'Copy failed. Select and copy manually.';
+    }
+}
+
+async function loadOutputs() {
+    const tbody = document.getElementById('outputs-tbody');
+    try {
+        const r = await fetch('/api/outputs');
+        const d = await r.json();
+        const items = d.outputs || [];
+        const colSpan = userRole === 'admin' ? 9 : 8;
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="' + colSpan + '" style="text-align:center;color:var(--text-muted);padding:30px;">No outputs yet. Click <strong>+ Add Output</strong> to create one.</td></tr>';
+            return;
+        }
+        let html = '';
+        items.forEach(o => {
+            let typeBadge = o.output_type === 'beast_raw'
+                ? '<span class="badge badge-netbird" style="font-size:11px;">beast raw</span>'
+                : o.output_type === 'cot'
+                ? '<span class="badge" style="font-size:11px;background:rgba(34,197,94,0.15);color:var(--green);">CoT</span>'
+                : o.output_type === 'adsb_direct'
+                ? '<span class="badge" style="font-size:11px;background:rgba(59,130,246,0.18);color:#93c5fd;">ADSB Direct</span>'
+                : o.output_type === 'json'
+                ? (function() {
+                    try { var c = typeof o.config === 'string' ? JSON.parse(o.config || '{}') : (o.config || {}); return c.range_api ? '<span class="badge badge-vpn" style="font-size:11px;">json</span> <span style="font-size:10px;color:var(--text-muted);">Range</span>' : '<span class="badge badge-vpn" style="font-size:11px;">json</span>'; } catch(e) { return '<span class="badge badge-vpn" style="font-size:11px;">json</span>'; }
+                  })()
+                : '<span class="badge badge-vpn" style="font-size:11px;">json</span>';
+            const modeBadge = o.mode === 'api'
+                ? '<span class="badge" style="font-size:11px;background:rgba(168,85,247,0.12);color:var(--purple);">api</span>'
+                : '<span class="badge badge-tailscale" style="font-size:11px;">push</span>';
+
+            // Key display in list: hide raw keys; show only type + status.
+            let keyCell = '—';
+            let keyStatusCell = '—';
+            if (o.mode === 'api' && o.key_meta) {
+                const k = o.key_meta;
+                const isDurable = k.key_type === 'durable';
+                keyCell = isDurable
+                    ? '<span class="badge" style="font-size:10px;background:rgba(16,185,129,0.12);color:var(--green);">durable</span>'
+                    : '<span class="badge" style="font-size:10px;background:rgba(148,163,184,0.12);color:var(--text-muted);">single-use</span>';
+                const isReady = k.status === 'ready';
+                keyStatusCell = isDurable
+                    ? '<span class="badge badge-live" style="font-size:11px;">active</span>'
+                    : (isReady
+                        ? '<span class="badge badge-live" style="font-size:11px;">ready</span>'
+                        : '<span class="badge" style="font-size:11px;background:rgba(239,68,68,0.1);color:var(--red);">used</span>');
+            }
+
+            const createdDisplay = o.created_at
+                ? (new Date(o.created_at)).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+                : '—';
+
+            let cotTlsPaused = false;
+            try {
+                const oc = JSON.parse(o.config || '{}');
+                cotTlsPaused = oc.cot_tls_paused === true;
+            } catch (e) { /* ignore */ }
+            const isActive = (o.status || 'active') === 'active';
+            const enableBtn = isActive
+                ? `<button type="button" class="btn" style="font-size:11px;padding:4px 10px;background:rgba(34,197,94,0.15);color:var(--green);" onclick="toggleOutputEnabled(${o.id}, false)" title="Disable output">On</button>`
+                : `<button type="button" class="btn" style="font-size:11px;padding:4px 10px;background:var(--bg-secondary);color:var(--text-muted);" onclick="toggleOutputEnabled(${o.id}, true)" title="Enable output">Off</button>`;
+
+            html += '<tr>';
+            const tlsPausedBadge = (o.output_type === 'cot' && o.mode === 'push' && cotTlsPaused)
+                ? ' <span class="badge badge-offline" style="font-size:10px;vertical-align:middle;" title="TLS handshake failed — open Edit and use Test TLS connection">TLS paused</span>'
+                : '';
+            html += `<td style="font-weight:500;">${o.name}${tlsPausedBadge}</td>`;
+            html += `<td>${typeBadge}</td>`;
+            html += `<td>${modeBadge}</td>`;
+            html += `<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${keyCell}</td>`;
+            html += `<td>${keyStatusCell}</td>`;
+            html += `<td style="font-size:12px;color:var(--text-muted);white-space:nowrap;">${createdDisplay}</td>`;
+            html += `<td style="text-align:center;">${enableBtn}</td>`;
+            if (userRole === 'admin') html += `<td style="color:var(--text-muted);font-size:12px;">${o.creator_name}</td>`;
+            html += `<td style="text-align:right;white-space:nowrap;">`;
+            if (o.output_type === 'cot') {
+                html += `<a href="/outputs/${o.id}/cotproxy" class="btn" style="font-size:11px;padding:4px 8px;margin-right:4px;text-decoration:none;">COTProxy config</a>`;
+            }
+            if (o.mode === 'api') {
+                const keyType = (o.key_meta || {}).key_type || 'single_use';
+                html += `<button class="btn" style="font-size:11px;padding:4px 8px;margin-right:4px;" onclick="regenKey(${o.id})">↺ Regen Key</button>`;
+            }
+            html += `<button class="btn" style="font-size:11px;padding:4px 8px;margin-right:4px;" onclick="openEditModal(${o.id})">Edit</button>`;
+            html += `<button class="btn btn-danger" style="font-size:11px;padding:4px 8px;" onclick="deleteOutput(${o.id}, '${o.name.replace(/'/g,"\\'")}')">Delete</button>`;
+            html += `</td></tr>`;
+        });
+        tbody.innerHTML = html;
+    } catch(e) {
+        const colSpan = userRole === 'admin' ? 9 : 8;
+        tbody.innerHTML = '<tr><td colspan="' + colSpan + '" style="color:var(--red);text-align:center;padding:20px;">Failed to load outputs</td></tr>';
+    }
+}
+
+async function toggleOutputEnabled(outputId, enable) {
+    const status = enable ? 'active' : 'inactive';
+    try {
+        const r = await fetch('/api/outputs/' + outputId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: status }),
+        });
+        const d = await r.json();
+        if (d.success) loadOutputs();
+        else alert(d.error || 'Failed to update');
+    } catch (e) {
+        alert('Request failed: ' + e);
+    }
+}
+
+function openCreateModal() {
+    document.getElementById('modal-title').textContent = 'Add Output';
+    document.getElementById('modal-output-id').value = '';
+    document.getElementById('modal-name').value = '';
+    document.getElementById('modal-type').value = 'json';
+    document.getElementById('modal-json-mode').value = 'stream';
+    document.getElementById('modal-mode').value = 'api';
+    document.getElementById('modal-key-type').value = 'single_use';
+    document.getElementById('modal-push-url').value = '';
+    document.getElementById('modal-cot-host').value = '';
+    document.getElementById('modal-cot-port').value = '8089';
+    document.getElementById('modal-cot-port').placeholder = '8089';
+    document.getElementById('modal-push-interval').value = '5';
+    document.getElementById('modal-notes').value = '';
+    document.getElementById('modal-enabled').checked = true;
+    document.getElementById('modal-error').style.display = 'none';
+    document.getElementById('filter-include-network-adsb').checked = true;
+    document.getElementById('adsb-direct-min-alt').value = '';
+    document.getElementById('adsb-direct-max-alt').value = '';
+    document.getElementById('filter-range-enable').checked = false;
+    document.getElementById('filter-range-lat').value = '';
+    document.getElementById('filter-range-lon').value = '';
+    document.getElementById('filter-range-nm').value = '';
+    filterRangeEnableChange();
+    document.getElementById('filter-elevation-enable').checked = false;
+    document.getElementById('filter-elevation-no-min').checked = false;
+    document.getElementById('filter-elevation-no-max').checked = false;
+    document.getElementById('filter-elevation-min').value = '0';
+    document.getElementById('filter-elevation-max').value = '40000';
+    document.getElementById('filter-elevation-min-slider').value = 0;
+    document.getElementById('filter-elevation-max-slider').value = 40000;
+    filterElevationEnableChange();
+    updateApiKeyDetailDisplay(null);
+    updateAdsbDirectUrlDisplay(null, '');
+    var saveBtn = document.getElementById('modal-save-btn');
+    saveBtn.textContent = 'Save';
+    saveBtn.onclick = saveOutput;
+    window._outputModalCfg = {};
+    updateCotTlsPausedBanner();
+    onTypeChange(); onModeChange();
+    document.getElementById('output-modal').classList.add('show');
+}
+
+async function openEditModal(id) {
+    const r = await fetch('/api/outputs/' + id);
+    const d = await r.json();
+    if (!d.output) return;
+    const o = d.output;
+    window._outputModalOutput = o;
+    const cfg = JSON.parse(o.config || '{}');
+    window._outputModalCfg = Object.assign({}, cfg);
+    const locked = (o.mode === 'api' && d.output.key_meta);
+
+    document.getElementById('modal-title').textContent = locked ? 'Output Details' : 'Edit Output';
+    document.getElementById('modal-output-id').value = o.id;
+    document.getElementById('modal-name').value = o.name;
+    document.getElementById('modal-type').value = o.output_type;
+    document.getElementById('modal-json-mode').value = (o.output_type === 'json' && cfg.range_api) ? 'range_api' : 'stream';
+    document.getElementById('modal-mode').value = o.mode;
+    document.getElementById('modal-push-url').value = cfg.push_url || '';
+    (function() {
+        const parsed = parseStoredCotUrl(cfg.cot_url || '');
+        document.getElementById('modal-cot-host').value = parsed.host;
+        document.getElementById('modal-cot-port').value = parsed.port;
+        document.getElementById('modal-cot-port').placeholder = '8089';
+    })();
+    document.getElementById('modal-push-interval').value = cfg.push_interval || 5;
+    document.getElementById('modal-notes').value = o.notes || '';
+    document.getElementById('modal-enabled').checked = (o.status || 'active') === 'active';
+    document.getElementById('filter-include-network-adsb').checked = cfg.include_network_adsb !== false;
+    document.getElementById('adsb-direct-min-alt').value = cfg.direct_alt_min_ft != null ? String(cfg.direct_alt_min_ft) : '';
+    document.getElementById('adsb-direct-max-alt').value = cfg.direct_alt_max_ft != null ? String(cfg.direct_alt_max_ft) : '';
+    document.getElementById('filter-range-enable').checked = !!cfg.range_limit_enabled;
+    document.getElementById('filter-range-lat').value = cfg.range_limit_lat != null ? String(cfg.range_limit_lat) : '';
+    document.getElementById('filter-range-lon').value = cfg.range_limit_lon != null ? String(cfg.range_limit_lon) : '';
+    document.getElementById('filter-range-nm').value = cfg.range_limit_nm != null ? String(cfg.range_limit_nm) : '';
+    filterRangeEnableChange();
+    document.getElementById('filter-elevation-enable').checked = !!cfg.elevation_filter_enabled;
+    document.getElementById('filter-elevation-no-min').checked = !!cfg.elevation_no_min;
+    document.getElementById('filter-elevation-no-max').checked = !!cfg.elevation_no_max;
+    document.getElementById('filter-elevation-min').value = cfg.elevation_min_ft != null ? String(cfg.elevation_min_ft) : '0';
+    document.getElementById('filter-elevation-max').value = cfg.elevation_max_ft != null ? String(cfg.elevation_max_ft) : '40000';
+    document.getElementById('filter-elevation-min-slider').value = cfg.elevation_min_ft != null ? Number(cfg.elevation_min_ft) : 0;
+    document.getElementById('filter-elevation-max-slider').value = cfg.elevation_max_ft != null ? Number(cfg.elevation_max_ft) : 40000;
+    filterElevationEnableChange();
+
+    // Lock fields if key exists — name/type/mode are frozen
+    const lockFields = ['modal-name', 'modal-type', 'modal-json-mode', 'modal-mode', 'modal-push-url', 'modal-push-interval', 'modal-cot-host', 'modal-cot-port'];
+    lockFields.forEach(fid => {
+        const el = document.getElementById(fid);
+        if (el) el.disabled = locked;
+    });
+    if (!locked && o.output_type === 'adsb_direct') {
+        document.getElementById('modal-mode').disabled = true;
+        document.getElementById('modal-mode').value = 'api';
+    }
+
+    // Show/hide lock notice
+    let notice = document.getElementById('modal-lock-notice');
+    if (locked) {
+        if (!notice) {
+            notice = document.createElement('div');
+            notice.id = 'modal-lock-notice';
+            notice.style = 'font-size:12px;color:var(--text-muted);background:var(--bg-secondary);border-radius:6px;padding:8px 12px;margin-bottom:12px;';
+            notice.textContent = '🔒 Type, mode, and name cannot be changed after an API key is generated. You can update notes or regenerate the key.';
+            document.getElementById('modal-name').closest('.card-grid').after(notice);
+        }
+        notice.style.display = 'block';
+    } else if (notice) {
+        notice.style.display = 'none';
+    }
+
+    var saveBtn = document.getElementById('modal-save-btn');
+    saveBtn.textContent = (locked && o.output_type !== 'adsb_direct') ? 'Save Notes' : 'Save';
+    saveBtn.onclick = saveOutput;
+    document.getElementById('modal-error').style.display = 'none';
+    onTypeChange(); onModeChange();
+    updateApiKeyDetailDisplay(o);
+    updateAdsbDirectUrlDisplay(o, '');
+    updateCotTlsPausedBanner();
+    document.getElementById('output-modal').classList.add('show');
+}
+
+document.getElementById('cot-test-tls-btn').addEventListener('click', function() { testCotTlsConnection(); });
+
+function setCotCertsSectionEnabled(enable) {
+    const uploadDiv = document.getElementById('cot-certs-upload');
+    if (!uploadDiv) return;
+    uploadDiv.style.pointerEvents = enable ? '' : 'none';
+    uploadDiv.style.opacity = enable ? '1' : '0.6';
+    var certFile = document.getElementById('cot-cert-file');
+    var keyFile = document.getElementById('cot-key-file');
+    var p12File = document.getElementById('cot-p12-file');
+    var p12Password = document.getElementById('cot-p12-password');
+    var uploadBtn = document.getElementById('cot-certs-upload-btn');
+    if (certFile) certFile.disabled = !enable;
+    if (keyFile) keyFile.disabled = !enable;
+    if (p12File) p12File.disabled = !enable;
+    if (p12Password) p12Password.disabled = !enable;
+    if (uploadBtn) uploadBtn.disabled = !enable;
+}
+
+async function loadCotCertStatus(outputId) {
+    const statusEl = document.getElementById('cot-certs-status');
+    const statusText = document.getElementById('cot-certs-status-text');
+    const replaceBtn = document.getElementById('cot-certs-replace-btn');
+    const uploadDiv = document.getElementById('cot-certs-upload');
+    const uploadMsg = document.getElementById('cot-certs-upload-msg');
+    statusEl.style.display = 'block';
+    uploadMsg.textContent = '';
+    setCotCertsSectionEnabled(true);
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-certs/status');
+        const d = await r.json();
+        if (r.status === 403) {
+            statusText.textContent = 'Only the output owner can manage certificates.';
+            replaceBtn.style.display = 'none';
+            uploadDiv.style.display = 'none';
+            return;
+        }
+        if (d.has_cert) {
+            statusText.textContent = 'Certificate installed.';
+            replaceBtn.style.display = 'inline-block';
+            replaceBtn.onclick = function() { uploadDiv.style.display = 'block'; replaceBtn.style.display = 'none'; statusText.textContent = ''; };
+            uploadDiv.style.display = 'none';
+        } else {
+            statusText.textContent = '';
+            replaceBtn.style.display = 'none';
+            uploadDiv.style.display = 'block';
+        }
+    } catch (e) {
+        statusText.textContent = 'Could not load certificate status.';
+        replaceBtn.style.display = 'none';
+        uploadDiv.style.display = 'block';
+    }
+}
+
+document.getElementById('cot-certs-replace-btn').onclick = function() {
+    document.getElementById('cot-certs-upload').style.display = 'block';
+    this.style.display = 'none';
+    document.getElementById('cot-certs-status-text').textContent = '';
+};
+
+function cotCertP12Chosen() {
+    document.getElementById('cot-cert-file').value = '';
+    document.getElementById('cot-key-file').value = '';
+}
+function cotCertKeyChosen() {
+    document.getElementById('cot-p12-file').value = '';
+    document.getElementById('cot-p12-password').value = '';
+}
+document.getElementById('cot-p12-file').addEventListener('change', function() {
+    if (this.files && this.files.length) cotCertP12Chosen();
+});
+document.getElementById('cot-cert-file').addEventListener('change', function() {
+    if (this.files && this.files.length) cotCertKeyChosen();
+});
+document.getElementById('cot-key-file').addEventListener('change', function() {
+    if (this.files && this.files.length) cotCertKeyChosen();
+});
+
+document.getElementById('cot-certs-upload-btn').onclick = async function() {
+    const outputId = document.getElementById('modal-output-id').value;
+    const msgEl = document.getElementById('cot-certs-upload-msg');
+    if (!outputId) {
+        msgEl.textContent = 'Save the output first, then upload certificates.';
+        msgEl.style.color = 'var(--yellow)';
+        return;
+    }
+    const certFile = document.getElementById('cot-cert-file').files[0];
+    const keyFile = document.getElementById('cot-key-file').files[0];
+    const p12File = document.getElementById('cot-p12-file').files[0];
+    msgEl.textContent = '';
+    const hasP12 = p12File && p12File.name && (p12File.name.toLowerCase().endsWith('.p12') || p12File.name.toLowerCase().endsWith('.pfx'));
+    const hasCertKey = certFile && keyFile;
+    if (hasP12 && hasCertKey) {
+        msgEl.textContent = 'Use one option only. Clear either the cert/key files or the .p12 file.';
+        msgEl.style.color = 'var(--red)';
+        return;
+    }
+    const fd = new FormData();
+    if (hasP12) {
+        fd.append('p12', p12File);
+        fd.append('p12_password', document.getElementById('cot-p12-password').value);
+    } else if (hasCertKey) {
+        fd.append('cert', certFile);
+        fd.append('key', keyFile);
+    } else {
+        msgEl.textContent = 'Use one option only: either select both certificate and key (Option 1) or a .p12 file (Option 2).';
+        msgEl.style.color = 'var(--red)';
+        return;
+    }
+    this.disabled = true;
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-certs', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            msgEl.textContent = 'Certificate and key saved.';
+            msgEl.style.color = 'var(--green)';
+            document.getElementById('cot-cert-file').value = '';
+            document.getElementById('cot-key-file').value = '';
+            document.getElementById('cot-p12-file').value = '';
+            document.getElementById('cot-p12-password').value = '';
+            if (window._outputModalCfg) window._outputModalCfg.cot_tls_paused = false;
+            updateCotTlsPausedBanner();
+            loadCotCertStatus(outputId);
+            loadOutputs();
+        } else {
+            msgEl.textContent = d.error || 'Upload failed';
+            msgEl.style.color = 'var(--red)';
+        }
+    } catch (e) {
+        msgEl.textContent = 'Request failed.';
+        msgEl.style.color = 'var(--red)';
+    }
+    this.disabled = false;
+};
+
+async function saveOutput() {
+    const errEl = document.getElementById('modal-error');
+    errEl.style.display = 'none';
+    const id = document.getElementById('modal-output-id').value;
+    const locked = document.getElementById('modal-name').disabled;
+    function buildCotUrl() {
+        const host = normalizeCotHostInput(document.getElementById('modal-cot-host').value);
+        document.getElementById('modal-cot-host').value = host;
+        const port = parseInt(document.getElementById('modal-cot-port').value, 10);
+        if (!host) return null;
+        if (isNaN(port) || port < 1 || port > 65535) return null;
+        return 'tls://' + host + ':' + port;
+    }
+
+    let payload;
+    if (locked) {
+        const cfg = window._outputModalCfg || {};
+        if (!applyFilterConfigToPayload(cfg, errEl)) return;
+        if (document.getElementById('cot-dest-config').style.display !== 'none') {
+            const cotUrl = buildCotUrl();
+            if (cotUrl) cfg.cot_url = cotUrl;
+        }
+        payload = {
+            notes: document.getElementById('modal-notes').value.trim(),
+            config: cfg,
+            status: document.getElementById('modal-enabled').checked ? 'active' : 'inactive'
+        };
+    } else {
+        const type = document.getElementById('modal-type').value;
+        const mode = document.getElementById('modal-mode').value;
+        // IMPORTANT: preserve existing COTProxy config when editing a COT output.
+        // When the output settings modal saves, it builds `config` from the Data filters UI; without merging,
+        // it would wipe optional CoTProxy fields like pass_all / include_icon_in_cot / cot_stale_seconds / etc.
+        const isEdit = !!id;
+        const existingCfg = (window._outputModalCfg || {});
+        const config = (isEdit && type === 'cot') ? Object.assign({}, existingCfg) : {};
+        if (mode === 'push') {
+            if (type === 'cot') {
+                const cotUrl = buildCotUrl();
+                if (!cotUrl) {
+                    errEl.textContent = 'CoT push: enter server address and a valid port (1–65535).';
+                    errEl.style.display = 'block';
+                    return;
+                }
+                config.cot_url = cotUrl;
+            } else config.push_url = document.getElementById('modal-push-url').value.trim();
+            if (type !== 'beast_raw' && type !== 'cot') config.push_interval = parseInt(document.getElementById('modal-push-interval').value) || 5;
+        }
+        if (!applyFilterConfigToPayload(config, errEl)) return;
+        payload = {
+            name:           document.getElementById('modal-name').value.trim(),
+            output_type:    type,
+            output_format:  type === 'cot' ? 'cot' : 'as_is',
+            mode:           mode,
+            key_type:       document.getElementById('modal-key-type').value,
+            config:         config,
+            notes:          document.getElementById('modal-notes').value.trim(),
+            status:         document.getElementById('modal-enabled').checked ? 'active' : 'inactive',
+        };
+        if (!payload.name) { errEl.textContent = 'Name is required.'; errEl.style.display = 'block'; return; }
+    }
+    const btn = document.getElementById('modal-save-btn');
+    btn.disabled = true;
+    try {
+        const r = await fetch(id ? '/api/outputs/' + id : '/api/outputs', {
+            method: id ? 'PUT' : 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (d.success || d.id) {
+            const type = document.getElementById('modal-type').value;
+            const mode = document.getElementById('modal-mode').value;
+            const isNewCotPush = !id && type === 'cot' && mode === 'push' && d.id;
+            if (isNewCotPush) {
+                document.getElementById('modal-output-id').value = d.id;
+                loadOutputs();
+                document.getElementById('cot-certs-status').style.display = 'block';
+                document.getElementById('cot-certs-status-text').textContent = 'Output saved. Upload certificates below (optional) or close.';
+                document.getElementById('cot-certs-replace-btn').style.display = 'none';
+                document.getElementById('cot-certs-upload').style.display = 'block';
+                setCotCertsSectionEnabled(true);
+                document.getElementById('modal-save-btn').textContent = 'Close';
+                document.getElementById('modal-save-btn').onclick = function() { closeOutputModal(); loadOutputs(); this.onclick = saveOutput; this.textContent = 'Save'; };
+            } else {
+                closeOutputModal();
+                loadOutputs();
+                if (d.api_key) {
+                    if (!id && type === 'adsb_direct' && d.id) {
+                        // Show output details modal after create so the user can copy the base URL.
+                        setTimeout(function(){ openEditModal(d.id); }, 120);
+                        return;
+                    }
+                    const extra = (type === 'json')
+                        ? { range_api: document.getElementById('modal-json-mode').value === 'range_api' }
+                        : (type === 'adsb_direct' ? { adsb_direct: true } : null);
+                    showKeyModal(d.api_key, type, extra);
+                }
+            }
+        } else {
+            errEl.textContent = d.error || 'Save failed';
+            errEl.style.display = 'block';
+        }
+    } catch(e) {
+        errEl.textContent = 'Request failed: ' + e;
+        errEl.style.display = 'block';
+    }
+    btn.disabled = false;
+}
+
+async function regenKey(id) {
+    if (!confirm('Regenerate API key?\n\nThe existing key will stop working immediately. Any active connections using it will be dropped.')) return;
+    const outRes = await fetch('/api/outputs/' + id);
+    const outData = await outRes.json();
+    const output = outData.output || {};
+    const cfg = typeof output.config === 'string' ? (function(){ try { return JSON.parse(output.config || '{}'); } catch(e){ return {}; } })() : (output.config || {});
+    const r = await fetch('/api/outputs/' + id + '/regenerate-key', { method: 'POST' });
+    const d = await r.json();
+    if (d.api_key) {
+        loadOutputs();
+        const extra = (output.output_type === 'json')
+            ? { range_api: !!cfg.range_api }
+            : (output.output_type === 'adsb_direct' ? { adsb_direct: true } : null);
+        showKeyModal(d.api_key, output.output_type, extra);
+    } else {
+        alert(d.error || 'Failed to regenerate key');
+    }
+}
+
+function showKeyModal(key, outputType, extra) {
+    document.getElementById('key-display').textContent = key;
+
+    let info = '';
+    if (outputType === 'beast_raw') {
+        info = `
+            <p style="margin:0 0 10px;"><strong>What this is:</strong> A live stream of raw ADS-B aircraft data in Beast format — the same format used by tools like tar1090, readsb, and most ADS-B decoders.</p>
+            <p style="margin:0 0 6px;"><strong>How to connect:</strong></p>
+            <ol style="margin:0 0 12px;padding-left:20px;line-height:1.8;">
+                <li>Connect your application to <code style="color:var(--green);">adsb.tak-solutions.com</code> on TCP port <code style="color:var(--green);">30005</code></li>
+                <li>As soon as the connection opens, send your API key followed by a newline — exactly like this:<br>
+                    <code style="display:block;margin:6px 0;padding:6px 10px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">${key}\n</code>
+                </li>
+                <li>If the key is accepted, the server responds with <code>OK</code> and immediately begins streaming Beast data</li>
+                <li>If rejected (wrong key or already in use), the server responds with <code>REJECTED</code> and closes the connection</li>
+            </ol>
+            <p style="margin:0;font-size:12px;color:var(--text-muted);">⚠️ The key can only be used for one active connection at a time. If you need to reconnect, regenerate the key first.</p>`;
+    } else if (outputType === 'json' && extra && extra.range_api) {
+        info = `
+            <p style="margin:0 0 10px;"><strong>What this is:</strong> JSON Range API — returns aircraft within a radius of a center point. Center and radius are in the URL; key in query or header.</p>
+            <p style="margin:0 0 6px;"><strong>How to call it:</strong></p>
+            <code style="display:block;margin:0 0 12px;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">GET /api/outputs/range/point/&lt;lat&gt;/&lt;lon&gt;/&lt;radius_nm&gt;?key=${key}</code>
+            <p style="margin:0 0 6px;"><strong>Example (curl):</strong></p>
+            <code style="display:block;margin:0 0 12px;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--text-secondary);">curl "https://adsb.tak-solutions.com/api/outputs/range/point/35.07/-85.18/150?key=${key}"</code>
+            <p style="margin:0 0 8px;font-size:12px;color:var(--text-muted);">Max radius 250 nm. Respects the &quot;Include Network ADSB Traffic&quot; setting for this output.</p>
+            <p style="margin:0 0 6px;"><strong>airplanes.live-style compatibility base:</strong></p>
+            <code style="display:block;margin:0;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">https://adsb.tak-solutions.com/api/outputs/json/${key}/v2/all</code>`;
+    } else if (outputType === 'adsb_direct') {
+        info = `
+            <p style="margin:0 0 10px;"><strong>What this is:</strong> ADSB Direct endpoint with the key embedded in the URL path (unique per output config).</p>
+            <p style="margin:0 0 6px;"><strong>How to call it:</strong></p>
+            <code style="display:block;margin:0 0 12px;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">GET /api/outputs/direct/${key}/point</code>
+            <p style="margin:0;font-size:12px;color:var(--text-muted);">Base URL only; the ADSB Direct plugin appends center/range values after <code>/point</code>.</p>`;
+    } else {
+        info = `
+            <p style="margin:0 0 10px;"><strong>What this is:</strong> A JSON endpoint that returns the current list of aircraft being tracked by this aggregator — the same data that feeds the live map.</p>
+            <p style="margin:0 0 6px;"><strong>How to call it:</strong></p>
+            <p style="margin:0 0 8px;">Make an HTTP GET request to this URL from your app or browser:</p>
+            <code style="display:block;margin:0 0 12px;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">https://adsb.tak-solutions.com/api/outputs/stream/${key}</code>
+            <p style="margin:0 0 6px;"><strong>Example (using curl in a terminal):</strong></p>
+            <code style="display:block;margin:0 0 12px;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--text-secondary);">curl "https://adsb.tak-solutions.com/api/outputs/stream/${key}"</code>
+            <p style="margin:0 0 8px;font-size:12px;color:var(--text-muted);">The response is a standard JSON object. Call it as often as you need — there's no rate limit, but once per second is plenty for aircraft tracking.</p>
+            <p style="margin:0 0 6px;"><strong>airplanes.live-style compatibility base:</strong></p>
+            <code style="display:block;margin:0;padding:8px 12px;background:var(--bg-primary);border-radius:4px;font-size:12px;word-break:break-all;color:var(--green);">https://adsb.tak-solutions.com/api/outputs/json/${key}/v2/all</code>`;
+    }
+    document.getElementById('key-usage-info').innerHTML = info;
+    document.getElementById('key-modal').classList.add('show');
+}
+
+function copyKey() {
+    const key = document.getElementById('key-display').textContent;
+    navigator.clipboard.writeText(key).then(() => alert('Key copied to clipboard'));
+}
+
+async function deleteOutput(id, name) {
+    if (!confirm(`Delete output "${name}"? This cannot be undone.`)) return;
+    const r = await fetch('/api/outputs/' + id, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) loadOutputs();
+    else alert(d.error || 'Delete failed');
+}
+
+function closeOutputModal() {
+    document.getElementById('output-modal').classList.remove('show');
+}
+
+document.getElementById('modal-cot-host').addEventListener('blur', function() {
+    this.value = normalizeCotHostInput(this.value);
+});
+document.getElementById('filter-range-enable').addEventListener('change', filterRangeEnableChange);
+document.getElementById('filter-elevation-enable').addEventListener('change', filterElevationEnableChange);
+document.getElementById('filter-elevation-no-min').addEventListener('change', filterElevationNoMinMaxChange);
+document.getElementById('filter-elevation-no-max').addEventListener('change', filterElevationNoMinMaxChange);
+document.getElementById('filter-elevation-min-slider').addEventListener('input', syncElevationMinFromSlider);
+document.getElementById('filter-elevation-min').addEventListener('change', syncElevationMinFromInput);
+document.getElementById('filter-elevation-max-slider').addEventListener('input', syncElevationMaxFromSlider);
+document.getElementById('filter-elevation-max').addEventListener('change', syncElevationMaxFromInput);
+
+loadOutputs();
+</script>
+{% endblock %}

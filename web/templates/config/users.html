@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+{% block page_title %}User Management{% endblock %}
+{% block content %}
+
+<!-- Pending Requests -->
+<div class="card" style="max-width:800px;margin-bottom:20px;border-color:rgba(234,179,8,0.4);">
+    <div class="card-header" style="background:rgba(234,179,8,0.06);">
+        <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:16px;">⚠️</span>
+            <h3 style="color:#eab308;">Pending Access Requests</h3>
+        </div>
+        <span style="font-size:12px;color:var(--text-muted);">{{ pending_users|length }} pending</span>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Username</th><th>Requested</th><th>Approve As</th><th style="text-align:right;">Actions</th></tr></thead>
+            <tbody>
+            {% for u in pending_users %}
+            <tr id="pending-row-{{ u.id }}">
+                <td style="font-weight:500;color:var(--text-primary);font-family:monospace;">{{ u.username }}</td>
+                <td style="font-size:12px;color:var(--text-muted);">{{ u.created_at[:16] }}</td>
+                <td>
+                    <select id="pending-role-{{ u.id }}" class="form-control" style="padding:4px 8px;font-size:12px;width:auto;">
+                        {% for r in roles %}
+                        <option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>
+                        {% endfor %}
+                    </select>
+                </td>
+                <td style="text-align:right;display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="btn" style="font-size:11px;padding:4px 12px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.4);color:#22c55e;"
+                            onclick="approveUser({{ u.id }})">Approve</button>
+                    <button class="btn btn-danger" style="font-size:11px;padding:4px 12px;"
+                            onclick="denyUser({{ u.id }}, {{ u.username|tojson }})">Deny</button>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Active Users -->
+<div class="card" style="max-width:800px;">
+    <div class="card-header">
+        <h3>Users</h3>
+        <button class="btn btn-primary" onclick="showAddModal()" style="font-size:12px;">+ Add User</button>
+        <button class="btn btn-danger" onclick="cleanUserDatabase()" style="font-size:12px;">Clean user database</button>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th style="min-width:220px;">
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <button type="button" class="btn btn-sm" onclick="setSort('username')" style="width:auto;">
+                                Username <span id="sort-indicator-username" style="font-weight:400;color:var(--text-muted);font-size:11px;"></span>
+                            </button>
+                            <input id="filter-username" type="text" placeholder="Filter username..." class="form-control"
+                                   style="padding:4px 8px;font-size:12px;width:100%;"
+                                   oninput="renderActiveUsersTable()">
+                        </div>
+                    </th>
+                    <th style="min-width:180px;">
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <button type="button" class="btn btn-sm" onclick="setSort('first_name')" style="width:auto;">
+                                First name <span id="sort-indicator-first_name" style="font-weight:400;color:var(--text-muted);font-size:11px;"></span>
+                            </button>
+                            <input id="filter-first_name" type="text" placeholder="Filter first name..." class="form-control"
+                                   style="padding:4px 8px;font-size:12px;width:100%;"
+                                   oninput="renderActiveUsersTable()">
+                        </div>
+                    </th>
+                    <th style="min-width:180px;">
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <button type="button" class="btn btn-sm" onclick="setSort('last_name')" style="width:auto;">
+                                Last name <span id="sort-indicator-last_name" style="font-weight:400;color:var(--text-muted);font-size:11px;"></span>
+                            </button>
+                            <input id="filter-last_name" type="text" placeholder="Filter last name..." class="form-control"
+                                   style="padding:4px 8px;font-size:12px;width:100%;"
+                                   oninput="renderActiveUsersTable()">
+                        </div>
+                    </th>
+                    <th style="min-width:160px;">
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <button type="button" class="btn btn-sm" onclick="setSort('role')" style="width:auto;">
+                                Role <span id="sort-indicator-role" style="font-weight:400;color:var(--text-muted);font-size:11px;"></span>
+                            </button>
+                            <select id="filter-role" class="form-control" style="padding:4px 8px;font-size:12px;width:100%;"
+                                    onchange="renderActiveUsersTable()">
+                                <option value="all" selected>All roles</option>
+                                {% for r in roles %}
+                                <option value="{{ r }}">{{ r }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="active-users-tbody">
+            {% for u in users %}
+            <tr id="user-row-{{ u.id }}"
+                data-username="{{ u.username|default('') }}"
+                data-first-name="{{ u.first_name|default('') }}"
+                data-last-name="{{ u.last_name|default('') }}"
+                data-role="{{ u.role|default('') }}">
+                <td style="font-weight:500;color:var(--text-primary);font-family:monospace;">
+                    <a href="/config/users/{{ u.id }}" style="color:inherit;text-decoration:none;">{{ u.username }}</a>
+                </td>
+                <td style="font-size:12px;color:var(--text-secondary);">
+                    {{ u.first_name|default('—') }}
+                </td>
+                <td style="font-size:12px;color:var(--text-secondary);">
+                    {{ u.last_name|default('—') }}
+                </td>
+                <td>
+                    <select class="form-control" style="padding:4px 8px;font-size:12px;width:auto;"
+                            onchange="changeRole({{ u.id }}, this.value)"
+                            {% if u.id == current_user.id|int %}disabled{% endif %}>
+                        {% for r in roles %}
+                        <option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>
+                        {% endfor %}
+                    </select>
+                </td>
+                <td style="font-size:12px;color:var(--text-muted);">{{ u.created_at[:10] }}</td>
+                <td style="display:flex;gap:6px;flex-wrap:wrap;">
+                    {% if current_user.role == 'admin' %}
+                    <button type="button" class="btn" style="font-size:11px;padding:4px 10px;"
+                            onclick="showResetModal({{ u.id }}, {{ u.username|tojson }})">Reset PW</button>
+                    {% endif %}
+                    {% if current_user.role == 'admin' and u.id != current_user.id|int %}
+                    <button type="button" class="btn btn-danger" style="font-size:11px;padding:4px 10px;"
+                            onclick="deleteUser({{ u.id }}, {{ u.username|tojson }})">Delete</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Add User Modal -->
+<div class="modal-overlay" id="add-modal">
+    <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+            <h3>Add User</h3>
+            <button class="modal-close" onclick="closeModal('add-modal')">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <div id="add-error" style="display:none;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:10px;font-size:13px;color:var(--red);margin-bottom:14px;"></div>
+            <div class="form-group"><label>Username</label><input class="form-control" type="text" id="add-username" autocomplete="off"></div>
+            <div class="form-group"><label>Password</label><input class="form-control" type="password" id="add-password" autocomplete="new-password"></div>
+            <div class="form-group">
+                <label>Role</label>
+                <select class="form-control" id="add-role">
+                    {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+                </select>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="closeModal('add-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="createUser()">Create User</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Reset Password Modal -->
+<div class="modal-overlay" id="reset-modal">
+    <div class="modal" style="max-width:380px;">
+        <div class="modal-header">
+            <h3>Reset Password</h3>
+            <button class="modal-close" onclick="closeModal('reset-modal')">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <div id="reset-error" style="display:none;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:10px;font-size:13px;color:var(--red);margin-bottom:14px;"></div>
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">Set new password for <strong id="reset-username"></strong></p>
+            <div class="form-group"><label>New Password</label><input class="form-control" type="password" id="reset-password" autocomplete="new-password"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="closeModal('reset-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="resetPassword()">Reset Password</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let resetTargetId = null;
+
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+function showAddModal() { document.getElementById('add-error').style.display='none'; document.getElementById('add-username').value=''; document.getElementById('add-password').value=''; document.getElementById('add-modal').classList.add('show'); }
+function showResetModal(id, name) { resetTargetId = id; document.getElementById('reset-username').textContent = name; document.getElementById('reset-password').value = ''; document.getElementById('reset-error').style.display='none'; document.getElementById('reset-modal').classList.add('show'); }
+
+async function approveUser(id) {
+    const role = document.getElementById('pending-role-' + id).value;
+    const r = await fetch('/config/users/' + id + '/approve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({role}) });
+    const d = await r.json();
+    if (d.success) {
+        document.getElementById('pending-row-' + id).remove();
+        location.reload();
+    } else { alert('Error: ' + d.error); }
+}
+
+async function denyUser(id, name) {
+    if (!confirm('Deny access request for "' + name + '"? They will be unable to log in.')) return;
+    const r = await fetch('/config/users/' + id + '/deny', { method: 'POST' });
+    const d = await r.json();
+    if (d.success) { document.getElementById('pending-row-' + id).remove(); }
+    else { alert('Error: ' + d.error); }
+}
+
+async function createUser() {
+    const username = document.getElementById('add-username').value.trim();
+    const password = document.getElementById('add-password').value;
+    const role = document.getElementById('add-role').value;
+    const errEl = document.getElementById('add-error');
+    if (!username || !password) { errEl.textContent = 'Username and password required.'; errEl.style.display='block'; return; }
+    const r = await fetch('/config/users/create', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password, role}) });
+    const d = await r.json();
+    if (d.success) { location.reload(); }
+    else { errEl.textContent = d.error || 'Error creating user'; errEl.style.display='block'; }
+}
+
+async function changeRole(id, role) {
+    const r = await fetch('/config/users/' + id + '/role', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({role}) });
+    const d = await r.json();
+    if (!d.success) {
+        alert('Error: ' + (d.error || 'Could not update role'));
+        location.reload();
+        return;
+    }
+    const row = document.getElementById('user-row-' + id);
+    if (row) row.dataset.role = (role || '').toLowerCase();
+    renderActiveUsersTable();
+}
+
+async function resetPassword() {
+    const password = document.getElementById('reset-password').value;
+    const errEl = document.getElementById('reset-error');
+    if (password.length < 6) { errEl.textContent = 'Password must be at least 6 characters.'; errEl.style.display='block'; return; }
+    const r = await fetch('/config/users/' + resetTargetId + '/reset-password', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password}) });
+    const d = await r.json();
+    if (d.success) { closeModal('reset-modal'); }
+    else { errEl.textContent = d.error || 'Error resetting password'; errEl.style.display='block'; }
+}
+
+async function deleteUser(id, name) {
+    if (!confirm('Delete user "' + name + '"? This cannot be undone.')) return;
+    const r = await fetch('/config/users/' + id + '/delete', { method:'POST' });
+    const d = await r.json();
+    if (d.success) {
+        const row = document.getElementById('user-row-' + id);
+        if (row) row.remove();
+        renderActiveUsersTable();
+    } else {
+        alert('Error: ' + (d.error || d.message || 'Delete failed'));
+    }
+}
+
+async function cleanUserDatabase() {
+    if (!confirm('Clean user database? This will delete all denied/rejected users (purging usernames).')) return;
+    const btns = document.querySelectorAll('button[onclick="cleanUserDatabase()"]');
+    btns.forEach(b => b.disabled = true);
+    try {
+        const r = await fetch('/config/users/clean', { method:'POST' });
+        const d = await r.json();
+        if (d.success) {
+            location.reload();
+        } else {
+            alert('Error: ' + (d.error || 'clean failed'));
+        }
+    } catch(e) {
+        alert('Error cleaning user database');
+    } finally {
+        btns.forEach(b => b.disabled = false);
+    }
+}
+
+let sortKey = null;  // set by header clicks
+let sortDir = 'asc'; // 'asc' | 'desc'
+
+function _getActiveUserRowDataset(row) {
+    return {
+        username: (row.dataset.username || '').toLowerCase(),
+        firstName: (row.dataset.firstName || '').toLowerCase(),
+        lastName: (row.dataset.lastName || '').toLowerCase(),
+        role: (row.dataset.role || '').toLowerCase(),
+    };
+}
+
+function setSort(key) {
+    const keys = ['username', 'first_name', 'last_name', 'role'];
+    if (sortKey === key) {
+        sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
+    } else {
+        sortKey = key;
+        sortDir = 'asc';
+    }
+
+    renderActiveUsersTable();
+
+    keys.forEach(k => {
+        const el = document.getElementById('sort-indicator-' + k);
+        if (!el) return;
+        if (sortKey === k) {
+            el.textContent = (sortDir === 'asc') ? ' ▲' : ' ▼';
+        } else {
+            el.textContent = '';
+        }
+    });
+}
+
+function userSortValue(row, key) {
+    const ds = _getActiveUserRowDataset(row);
+    if (key === 'username') return ds.username;
+    if (key === 'first_name') return ds.firstName;
+    if (key === 'last_name') return ds.lastName;
+    if (key === 'role') return ds.role;
+    return '';
+}
+
+function renderActiveUsersTable() {
+    const tbody = document.getElementById('active-users-tbody');
+    if (!tbody) return;
+
+    // Collect rows fresh (handles delete without breaking the list).
+    const rows = Array.from(tbody.querySelectorAll('tr[id^="user-row-"]'));
+
+    const fUsername = (document.getElementById('filter-username')?.value || '').trim().toLowerCase();
+    const fFirst = (document.getElementById('filter-first_name')?.value || '').trim().toLowerCase();
+    const fLast = (document.getElementById('filter-last_name')?.value || '').trim().toLowerCase();
+    const fRole = (document.getElementById('filter-role')?.value || 'all').trim().toLowerCase();
+
+    const emptyRow = document.getElementById('active-users-empty');
+    if (emptyRow) emptyRow.remove();
+
+    const filtered = rows.filter(row => {
+        const ds = _getActiveUserRowDataset(row);
+        const okUsername = !fUsername || ds.username.includes(fUsername);
+        const okFirst = !fFirst || ds.firstName.includes(fFirst);
+        const okLast = !fLast || ds.lastName.includes(fLast);
+        const okRole = fRole === 'all' || ds.role === fRole;
+        return okUsername && okFirst && okLast && okRole;
+    });
+
+    // Hide all rows, then show sorted filtered ones.
+    rows.forEach(r => { r.style.display = filtered.includes(r) ? '' : 'none'; });
+
+    if (filtered.length === 0) {
+        const tr = document.createElement('tr');
+        tr.id = 'active-users-empty';
+        tr.innerHTML = '<td colspan="6" style="text-align:center;color:var(--text-muted);padding:40px;">No users found</td>';
+        tbody.appendChild(tr);
+        return;
+    }
+
+    if (sortKey) {
+        const dirMul = (sortDir === 'asc') ? 1 : -1;
+        filtered.sort((a, b) => {
+            const va = userSortValue(a, sortKey);
+            const vb = userSortValue(b, sortKey);
+            if (va === vb) return 0;
+            return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' }) * dirMul;
+        });
+    }
+
+    // Append in sorted order (reorders only the visible rows).
+    filtered.forEach(row => tbody.appendChild(row));
+}
+
+// Wire filters.
+window.addEventListener('load', function () {
+    renderActiveUsersTable();
+});
+</script>
+{% endblock %}

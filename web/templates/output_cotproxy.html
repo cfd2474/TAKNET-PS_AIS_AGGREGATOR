@@ -1,0 +1,1485 @@
+{% extends "base.html" %}
+{% block page_title %}COTProxy config — {{ output.name }}{% endblock %}
+
+{% block content %}
+<style>
+.collapse-hidden { display: none !important; }
+.ps-air-icon-grid img { width: 32px; height: 32px; object-fit: contain; cursor: pointer; border: 2px solid transparent; border-radius: 4px; }
+.ps-air-icon-grid img:hover { border-color: var(--accent); }
+.ps-air-icon-grid .icon-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; padding: 4px; border-radius: 6px; }
+.ps-air-icon-grid .icon-cell:hover { background: var(--bg-card-hover); }
+.ps-air-icon-grid .icon-cell span { font-size: 10px; max-width: 140px; white-space: normal; word-break: break-word; text-align: center; color: var(--text-muted); }
+.ps-air-icon-grid.icon-grid-even { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 12px; justify-items: center; }
+th.sortable:hover { color: var(--accent); }
+.sort-arrow { font-size:10px; color: var(--text-muted); margin-left:2px; }
+.sort-arrow.asc::after { content: ' ▲'; }
+.sort-arrow.desc::after { content: ' ▼'; }
+.filter-row th { padding: 4px 6px; vertical-align: middle; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+.filter-row input, .filter-row select { width: 100%; max-width: 140px; font-size: 12px; padding: 4px 6px; box-sizing: border-box; }
+.filter-row .filter-clear { font-size: 11px; color: var(--accent); cursor: pointer; }
+.filter-row .filter-clear:hover { text-decoration: underline; }
+.cot-ref-symbol { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+.cot-ref-symbol svg { max-width: 36px; max-height: 36px; }
+</style>
+
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+    <div>
+        <a href="/outputs" style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:inline-block;">← Outputs</a>
+        <h2 style="font-size:18px;font-weight:600;margin:0;">COTProxy config: {{ output.name }}</h2>
+        <p style="font-size:13px;color:var(--text-muted);margin:2px 0 0;">Transform rules by ICAO hex (callsign, type, icon). Same concept as <a href="https://github.com/snstac/cotproxy" target="_blank" rel="noopener">COTProxy</a> known_craft. For TAK/CoT protocol handling see <a href="https://github.com/snstac/pytak" target="_blank" rel="noopener">PyTAK</a>.</p>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+        <a href="/api/outputs/cot-transforms/template" class="btn" style="font-size:13px;">Download template CSV</a>
+        <label class="btn btn-primary" style="font-size:13px;margin:0;cursor:pointer;">
+            Import CSV <input type="file" id="csv-file" accept=".csv" style="display:none;">
+        </label>
+        <button class="btn btn-primary" onclick="openAddModal()" style="font-size:13px;">+ Add transform</button>
+    </div>
+</div>
+
+<!-- Pass all traffic and CoT options -->
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <h3 style="margin:0;font-size:14px;">Traffic filter &amp; CoT options</h3>
+    </div>
+    <div style="padding:14px 20px;display:flex;flex-direction:column;gap:16px;">
+        <label style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;">
+            <input type="checkbox" id="pass-all-toggle" style="margin-top:3px;">
+            <div>
+                <span style="font-weight:600;font-size:13px;">Pass all traffic</span>
+                <p id="pass-all-description" style="font-size:12px;color:var(--text-muted);margin:6px 0 0;line-height:1.45;">Only transformed data is sent — aircraft that have a transform rule are sent; all other traffic is filtered out.</p>
+                <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;line-height:1.45;">
+                    Note: enable this if COTProxy transforms are not being used (e.g. you have no per-hex rules), so even network traffic is still forwarded.
+                </p>
+            </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;">
+            <input type="checkbox" id="pass-only-tisb-toggle" style="margin-top:3px;">
+            <div>
+                <span style="font-weight:600;font-size:13px;">Pass only TIS-B</span>
+                <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;line-height:1.45;">
+                    When enabled, detected TIS-B traffic is passed in addition to aircraft matched by COTProxy transforms.
+                    Existing TIS-B CoT handling and formatting remain unchanged.
+                </p>
+            </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;">
+            <input type="checkbox" id="distress-hostile-toggle" style="margin-top:3px;">
+            <div>
+                <span style="font-weight:600;font-size:13px;">Distress -> Hostile CoT</span>
+                <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;line-height:1.45;">
+                    When enabled, any aircraft with emergency status OR squawk <strong>7700</strong> will be sent using the hostile CoT variant for the same class (instead of friendly).
+                </p>
+            </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;">
+            <input type="checkbox" id="include-icon-in-cot-toggle" style="margin-top:3px;">
+            <div>
+                <span style="font-weight:600;font-size:13px;">Include transform icon in CoT</span>
+                <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;line-height:1.45;">Send &lt;usericon&gt; in the CoT message so ATAK/TAK shows the chosen icon. Uncheck if the callsign label appears too high above the icon on the map.</p>
+            </div>
+        </label>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <label for="cot-stale-seconds" style="font-weight:600;font-size:13px;">CoT stale (seconds)</label>
+            <input type="number" id="cot-stale-seconds" min="5" max="300" step="1" style="width:80px;padding:6px 10px;font-size:13px;">
+            <span style="font-size:12px;color:var(--text-muted);">How long until a marker is considered stale in TAK (5–300). Lower = faster refresh/removal when aircraft leave. Default 30.</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header" style="flex-wrap:wrap;gap:8px;">
+        <h3>Transform rules</h3>
+        <span style="font-size:12px;color:var(--text-muted);" id="transform-count">0</span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+                <input type="checkbox" id="select-all-top" title="Select all"> Select all
+            </label>
+            <button type="button" class="btn" id="cot-dup-btn" style="font-size:12px;" onclick="openCotDuplicatesModal()">Find duplicates</button>
+            <button type="button" class="btn btn-danger" id="bulk-delete-btn-top" style="font-size:12px;display:none;" onclick="bulkDeleteTransforms()">Delete selected</button>
+            <button type="button" class="btn btn-danger" id="delete-all-btn-top" style="font-size:12px;display:none;" onclick="deleteAllTransforms()">Delete all</button>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:36px;"><input type="checkbox" id="select-all-header" title="Select all on page"></th>
+                    <th class="sortable" data-sort="hex" style="cursor:pointer;user-select:none;" title="Sort by HEX">HEX <span id="sort-hex" class="sort-arrow"></span></th>
+                    <th class="sortable" data-sort="callsign" style="cursor:pointer;user-select:none;" title="Sort by Callsign">Callsign <span id="sort-callsign" class="sort-arrow"></span></th>
+                    <th class="sortable" data-sort="type" style="cursor:pointer;user-select:none;" title="Sort by Type">Type <span id="sort-type" class="sort-arrow"></span></th>
+                    <th class="sortable" data-sort="domain" style="cursor:pointer;user-select:none;" title="Sort by Domain">Domain <span id="sort-domain" class="sort-arrow"></span></th>
+                    <th class="sortable" data-sort="agency" style="cursor:pointer;user-select:none;" title="Sort by Agency">Agency <span id="sort-agency" class="sort-arrow"></span></th>
+                    <th class="sortable" data-sort="reg" style="cursor:pointer;user-select:none;" title="Sort by Reg">Reg <span id="sort-reg" class="sort-arrow"></span></th>
+                    <th>Model</th>
+                    <th>CoT type</th>
+                    <th>Icon</th>
+                    <th>Video</th>
+                    <th style="width:100px;"></th>
+                </tr>
+                <tr class="filter-row">
+                    <th><span class="filter-clear" id="filter-clear-btn" title="Clear all filters">Clear</span></th>
+                    <th><input type="text" id="filter-hex" placeholder="Filter…" title="Filter by HEX"></th>
+                    <th><input type="text" id="filter-callsign" placeholder="Filter…" title="Filter by callsign"></th>
+                    <th><select id="filter-type" title="Filter by type"><option value="">All</option></select></th>
+                    <th><select id="filter-domain" title="Filter by domain"><option value="">All</option></select></th>
+                    <th><select id="filter-agency" title="Filter by agency"><option value="">All</option></select></th>
+                    <th><input type="text" id="filter-reg" placeholder="Filter…" title="Filter by reg"></th>
+                    <th><input type="text" id="filter-model" placeholder="Filter…" title="Filter by model"></th>
+                    <th><select id="filter-cot" title="Filter by CoT type"><option value="">All</option></select></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="transforms-tbody">
+                <tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:24px;">Loading…</td></tr>
+            </tbody>
+            <tfoot id="transforms-tfoot" style="display:none;">
+                <tr>
+                    <td colspan="12" style="padding:10px 12px;background:var(--bg-secondary);border-top:1px solid var(--border);">
+                        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-right:12px;">
+                            <input type="checkbox" id="select-all-bottom" title="Select all on page"> Select all
+                        </label>
+                        <button type="button" class="btn btn-danger" id="bulk-delete-btn-bottom" style="font-size:12px;" onclick="bulkDeleteTransforms()">Delete selected</button>
+                        <button type="button" class="btn btn-danger" id="delete-all-btn-bottom" style="font-size:12px;" onclick="deleteAllTransforms()">Delete all</button>
+                    </td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+    <div id="pagination-bar" style="display:none;padding:12px 20px;background:var(--bg-secondary);border-top:1px solid var(--border);flex-wrap:wrap;gap:12px;align-items:center;">
+        <span style="font-size:12px;color:var(--text-muted);">Rows per page:</span>
+        <select id="per-page-select" style="font-size:12px;padding:4px 8px;" onchange="changePerPage()">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+        </select>
+        <span id="pagination-range" style="font-size:12px;color:var(--text-secondary);"></span>
+        <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+            <button type="button" class="btn" id="page-prev" style="font-size:12px;padding:4px 10px;" onclick="goToPage(currentPage - 1)">Prev</button>
+            <span id="page-indicator" style="font-size:12px;color:var(--text-secondary);">Page 1 of 1</span>
+            <button type="button" class="btn" id="page-next" style="font-size:12px;padding:4px 10px;" onclick="goToPage(currentPage + 1)">Next</button>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk delete status modal (processing / success / failure) -->
+<div class="modal-overlay" id="bulk-delete-modal" style="pointer-events:auto;">
+    <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+            <h3 id="bulk-delete-modal-title">Removing transforms</h3>
+        </div>
+        <div class="modal-body">
+            <div id="bulk-delete-processing" style="text-align:center;padding:20px;">
+                <p style="margin:0;color:var(--text-secondary);">Removing selected entries… Please wait.</p>
+            </div>
+            <div id="bulk-delete-success" style="display:none;text-align:center;padding:20px;">
+                <p style="margin:0 0 16px;color:var(--green);" id="bulk-delete-success-msg"></p>
+                <button type="button" class="btn btn-primary" id="bulk-delete-dismiss-btn" onclick="dismissBulkDeleteModal()">Dismiss</button>
+            </div>
+            <div id="bulk-delete-failure" style="display:none;padding:20px;">
+                <p style="margin:0 0 12px;color:var(--red);" id="bulk-delete-failure-msg"></p>
+                <button type="button" class="btn btn-primary" onclick="dismissBulkDeleteModal()">Dismiss</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CSV import status modal (processing / success / failure) -->
+<div class="modal-overlay" id="csv-import-modal" style="pointer-events:auto;">
+    <div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+            <h3 id="csv-import-modal-title">Importing CSV</h3>
+        </div>
+        <div class="modal-body">
+            <div id="csv-import-processing" style="text-align:center;padding:20px;">
+                <p style="margin:0;color:var(--text-secondary);">Processing… Please wait.</p>
+            </div>
+            <div id="csv-import-success" style="display:none;text-align:center;padding:20px;">
+                <p style="margin:0 0 16px;color:var(--green);" id="csv-import-success-msg"></p>
+                <button type="button" class="btn btn-primary" onclick="dismissCsvImportModal()">Dismiss</button>
+            </div>
+            <div id="csv-import-failure" style="display:none;padding:20px;">
+                <p style="margin:0 0 12px;color:var(--red);" id="csv-import-failure-msg"></p>
+                <button type="button" class="btn btn-primary" onclick="dismissCsvImportModal()">Dismiss</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CoTProxy duplicates merge modal -->
+<div class="modal-overlay" id="cot-dup-modal">
+    <div class="modal" style="max-width:900px;">
+        <div class="modal-header">
+            <h3>Merge duplicate transforms</h3>
+            <button class="modal-close" onclick="closeCotDuplicatesModal()">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <div id="cot-dup-scan-view">
+                <p style="margin:0 0 12px;color:var(--text-secondary);font-size:13px;line-height:1.5;">
+                    This scans transforms by HEX (case-insensitive). Exact duplicate rows (all fields match) can be auto-merged first; mismatched rows can be rectified field-by-field.
+                </p>
+                <div id="cot-dup-scan-summary" style="font-size:13px;color:var(--text-primary);margin-bottom:12px;"></div>
+                <div id="cot-dup-scan-error" style="display:none;margin-bottom:12px;border:1px solid rgba(239,68,68,0.3);background:rgba(239,68,68,0.08);border-radius:8px;padding:12px;color:var(--red);font-size:13px;"></div>
+                <div id="cot-dup-actions-scan" style="display:flex;gap:10px;justify-content:flex-end;align-items:center;">
+                    <button type="button" class="btn" style="font-size:12px;" onclick="closeCotDuplicatesModal()">Cancel</button>
+                </div>
+                <div id="cot-dup-actions-ready" style="display:none;gap:10px;justify-content:flex-end;align-items:center;">
+                    <button type="button" class="btn btn-primary" id="cot-dup-automerge-btn" style="font-size:12px;" onclick="cotDupAutomerge()" disabled>
+                        Auto merge identical records
+                    </button>
+                    <button type="button" class="btn btn-primary" id="cot-dup-rectify-btn" style="font-size:12px;" onclick="cotDupStartRectify()" disabled>
+                        Rectify mismatches
+                    </button>
+                    <button type="button" class="btn" style="font-size:12px;" onclick="closeCotDuplicatesModal()">Close</button>
+                </div>
+            </div>
+
+            <div id="cot-dup-rectify-view" style="display:none;">
+                <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+                    <div>
+                        <h4 style="margin:0;font-size:14px;">Rectify mismatches</h4>
+                        <p id="cot-dup-rectify-subtitle" style="margin:4px 0 0;color:var(--text-muted);font-size:12px;line-height:1.4;"></p>
+                    </div>
+                    <div id="cot-dup-rectify-status" style="color:var(--text-muted);font-size:12px;"></div>
+                </div>
+
+                <div style="margin-top:14px;">
+                    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Matching records (read-only)</div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>HEX</th>
+                                    <th>Callsign</th>
+                                    <th>Type</th>
+                                    <th>Domain</th>
+                                    <th>Agency</th>
+                                    <th>Reg</th>
+                                    <th>Model</th>
+                                    <th>CoT</th>
+                                    <th>Icon</th>
+                                    <th>Remarks</th>
+                                    <th>Video</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cot-dup-records-tbody">
+                                <tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:18px;">No records loaded.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div style="margin-top:14px;">
+                    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Resolved values</div>
+                    <div id="cot-dup-resolve-fields" style="display:flex;flex-direction:column;gap:10px;"></div>
+                </div>
+
+                <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:14px;">
+                    <button type="button" class="btn" style="font-size:12px;" onclick="cotDupSkipCurrent()">
+                        Skip
+                    </button>
+                    <button type="button" class="btn btn-primary" id="cot-dup-merge-btn" style="font-size:12px;" onclick="cotDupMergeAndNext()">
+                        Merge
+                    </button>
+                    <button type="button" class="btn" style="font-size:12px;" onclick="cotDupFinish()">Finish</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Auto merge status modal -->
+<div class="modal-overlay" id="cot-dup-auto-modal" style="pointer-events:auto;">
+    <div class="modal" style="max-width:430px;">
+        <div class="modal-header">
+            <h3 id="cot-dup-auto-title">Auto merge identical records</h3>
+        </div>
+        <div class="modal-body">
+            <div id="cot-dup-auto-processing" style="text-align:center;padding:20px;">
+                <p style="margin:0;color:var(--text-secondary);">Processing… Please wait.</p>
+            </div>
+            <div id="cot-dup-auto-result" style="display:none;padding:20px;">
+                <p id="cot-dup-auto-message" style="margin:0 0 14px;font-size:13px;"></p>
+                <div style="display:flex;justify-content:flex-end;">
+                    <button type="button" class="btn btn-primary" onclick="closeCotDupAutoModal()">Acknowledge</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add / Edit transform modal -->
+<div class="modal-overlay" id="transform-modal">
+    <div class="modal" style="max-width:620px;">
+        <div class="modal-header">
+            <h3 id="transform-modal-title">Add transform</h3>
+            <button class="modal-close" onclick="closeTransformModal()">&#x2715;</button>
+        </div>
+        <div class="modal-body">
+            <input type="hidden" id="transform-id" value="">
+            <div class="card-grid card-grid-2" style="gap:12px;">
+                <div class="form-group">
+                    <label>HEX (ICAO 24-bit) *</label>
+                    <input class="form-control" id="t-hex" placeholder="A1B2C3">
+                </div>
+                <div class="form-group">
+                    <label>Callsign</label>
+                    <input class="form-control" id="t-callsign" placeholder="N12345-AGENCY">
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <input class="form-control" id="t-type" placeholder="HELICOPTER, FIXED WING">
+                </div>
+                <div class="form-group">
+                    <label>CoT type (2525)</label>
+                    <select class="form-control" id="t-cot-preset" style="max-width:100%;">
+                        <option value="">Default (from aircraft)</option>
+                        <option value="a-f-A">Generic (air)</option>
+                        <option value="a-f-A-C">Civil (generic)</option>
+                        <option value="a-f-A-C-F">Civil fixed wing</option>
+                        <option value="a-f-A-C-H">Civil rotary</option>
+                        <option value="a-f-A-C-L">Civil LTA</option>
+                        <option value="a-f-A-C-F-q">Civil UAV</option>
+                        <option value="a-f-A-M">Military (generic)</option>
+                        <option value="a-f-A-M-F">Military fixed wing</option>
+                        <option value="a-f-A-M-H">Military rotary</option>
+                        <option value="a-f-A-M-L">Military LTA</option>
+                        <option value="a-f-A-M-F-Q">Military UAV</option>
+                        <option value="__custom__">Custom…</option>
+                    </select>
+                    <input class="form-control" id="t-cot-custom" placeholder="e.g. a-f-A-C-H" style="margin-top:6px;display:none;">
+                </div>
+                <div class="form-group">
+                    <label>Domain</label>
+                    <input class="form-control" id="t-domain" placeholder="CIV, FED, CAP">
+                </div>
+                <div class="form-group">
+                    <label>Agency</label>
+                    <input class="form-control" id="t-agency" placeholder="Agency name">
+                </div>
+                <div class="form-group">
+                    <label>Reg</label>
+                    <input class="form-control" id="t-reg" placeholder="N-number">
+                </div>
+                <div class="form-group">
+                    <label>Model</label>
+                    <input class="form-control" id="t-model" placeholder="BELL 407">
+                </div>
+                <div class="form-group" style="grid-column:1/-1;">
+                    <label>Icon (TAK path, e.g. UID/Public Safety Air/name.png)</label>
+                    <input class="form-control" id="t-icon" placeholder="66f14976-.../Public Safety Air/CIV_FIXED_CAP.png">
+                </div>
+                <div class="form-group" style="grid-column:1/-1;">
+                    <label style="margin-bottom:6px;">Choose icon</label>
+                    <div>
+                        <span style="font-size:12px;color:var(--text-muted);">PS Air Icons</span>
+                        <div id="modal-icon-picker" class="ps-air-icon-grid" style="display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto;padding:8px;background:var(--bg-secondary);border-radius:8px;margin-top:4px;"></div>
+                    </div>
+                </div>
+                <div class="form-group" style="grid-column:1/-1;">
+                    <label>Remarks (CoT &lt;remarks&gt; — optional)</label>
+                    <input class="form-control" id="t-remarks" placeholder="e.g. notes, unit info">
+                </div>
+                <div class="form-group" style="grid-column:1/-1;">
+                    <label>Video URL (CoT &lt;__video url="..."&gt; — optional)</label>
+                    <input class="form-control" id="t-video" type="url" placeholder="https://...">
+                </div>
+            </div>
+            <div id="transform-modal-error" style="display:none;background:rgba(239,68,68,0.1);border-radius:6px;padding:10px;font-size:13px;color:var(--red);margin-top:8px;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                <button class="btn" onclick="closeTransformModal()">Cancel</button>
+                <button class="btn btn-primary" id="transform-save-btn" onclick="saveTransform()">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Civil aircraft reference (collapsible) — same grid layout as PS Air / NATO -->
+<div class="card" style="margin-top:16px;">
+    <div class="card-header" style="cursor:pointer;" onclick="document.getElementById('cot-ref-civil-body').classList.toggle('collapse-hidden'); document.getElementById('cot-ref-civil-toggle').textContent = document.getElementById('cot-ref-civil-body').classList.contains('collapse-hidden') ? '▼ Show' : '▲ Hide';">
+        <h3 style="margin:0;font-size:14px;">Civil aircraft (MIL-STD-2525D)</h3>
+        <span id="cot-ref-civil-toggle" style="font-size:12px;color:var(--text-muted);">▼ Show</span>
+    </div>
+    <div id="cot-ref-civil-body" class="collapse-hidden" style="padding:12px 20px 20px;">
+        <div id="cot-ref-civil-grid" class="ps-air-icon-grid icon-grid-even"></div>
+    </div>
+</div>
+
+<!-- Military aircraft reference (collapsible) — same grid layout as PS Air / NATO -->
+<div class="card" style="margin-top:16px;">
+    <div class="card-header" style="cursor:pointer;" onclick="document.getElementById('cot-ref-mil-body').classList.toggle('collapse-hidden'); document.getElementById('cot-ref-mil-toggle').textContent = document.getElementById('cot-ref-mil-body').classList.contains('collapse-hidden') ? '▼ Show' : '▲ Hide';">
+        <h3 style="margin:0;font-size:14px;">Military aircraft (MIL-STD-2525D)</h3>
+        <span id="cot-ref-mil-toggle" style="font-size:12px;color:var(--text-muted);">▼ Show</span>
+    </div>
+    <div id="cot-ref-mil-body" class="collapse-hidden" style="padding:12px 20px 20px;">
+        <div id="cot-ref-mil-grid" class="ps-air-icon-grid icon-grid-even"></div>
+    </div>
+</div>
+
+<!-- PS Air Icons reference (collapsible) -->
+<div class="card" style="margin-top:16px;">
+    <div class="card-header" style="cursor:pointer;" onclick="document.getElementById('ps-air-ref-body').classList.toggle('collapse-hidden'); document.getElementById('ps-air-ref-toggle').textContent = document.getElementById('ps-air-ref-body').classList.contains('collapse-hidden') ? '▼ Show' : '▲ Hide';">
+        <h3 style="margin:0;font-size:14px;">PS Air Icons reference (Public Safety Air v8)</h3>
+        <span id="ps-air-ref-toggle" style="font-size:12px;color:var(--text-muted);">▼ Show</span>
+    </div>
+    <div id="ps-air-ref-body" class="collapse-hidden" style="padding:12px 20px 20px;">
+        <div id="ps-air-ref-grid" class="ps-air-icon-grid icon-grid-even"></div>
+    </div>
+</div>
+
+<footer style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--text-muted);">
+    CoT output uses <a href="https://github.com/snstac/pytak" target="_blank" rel="noopener">PyTAK</a> for TAK ecosystem compatibility. Icons: PS Air Icons v8 (Public Safety Air).
+</footer>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+const outputId = {{ output.id }};
+
+// Civil / Military ref icons: cot, name, icon filename (cot_ref_icons)
+var CIVIL_REF_ICONS = [
+    { cot: 'a-f-A', name: 'Generic (air)', icon: 'civ generic.png' },
+    { cot: 'a-f-A-C', name: 'Civil (generic)', icon: 'civ generic.png' },
+    { cot: 'a-f-A-C-F', name: 'Civil fixed wing', icon: 'civ fixed wing.png' },
+    { cot: 'a-f-A-C-H', name: 'Civil rotary', icon: 'civ rotary wing.png' },
+    { cot: 'a-f-A-C-L', name: 'Civil LTA', icon: 'civ lighter than air.png' },
+    { cot: 'a-f-A-C-F-q', name: 'Civil UAV', icon: 'civ drone uav.png' },
+    { cot: 'a-f-A-U', name: 'Unknown air (TIS-B)', icon: 'Unknown air.png' }
+];
+var MIL_REF_ICONS = [
+    { cot: 'a-f-A-M', name: 'Military (generic)', icon: 'mil generic.png' },
+    { cot: 'a-f-A-M-F', name: 'Military fixed wing', icon: 'mil fixed wing.png' },
+    { cot: 'a-f-A-M-H', name: 'Military rotary', icon: 'Mil rotary.png' },
+    { cot: 'a-f-A-M-L', name: 'Military LTA', icon: 'mil lighter than air.png' },
+    { cot: 'a-f-A-M-F-Q', name: 'Military UAV', icon: 'mil drone uav.png' }
+];
+var COT_REF_ICON_BASE = '{{ url_for("static", filename="cot_ref_icons/") }}';
+function loadCivilMilitaryRefs() {
+    function addRefGrid(containerId, items) {
+        var el = document.getElementById(containerId);
+        if (!el) return;
+        el.innerHTML = '';
+        items.forEach(function(item) {
+            var path = 'cot_ref_icons/' + item.icon;
+            var url = (COT_REF_ICON_BASE.endsWith('/') ? COT_REF_ICON_BASE : COT_REF_ICON_BASE + '/') + encodeURIComponent(item.icon);
+            var cell = document.createElement('div');
+            cell.className = 'icon-cell';
+            cell.dataset.path = path;
+            cell.dataset.cot = item.cot;
+            cell.title = item.cot + ' — ' + item.name;
+            cell.innerHTML = '<img src="' + url + '" alt=""><span>' + escapeHtml(item.name) + '</span>';
+            cell.addEventListener('click', function() { pickIcon(this.dataset.path, this.dataset.cot); });
+            el.appendChild(cell);
+        });
+    }
+    addRefGrid('cot-ref-civil-grid', CIVIL_REF_ICONS);
+    addRefGrid('cot-ref-mil-grid', MIL_REF_ICONS);
+}
+
+let outputConfig = {{ output_config | tojson }};
+let psAirIcons = {{ (ps_air_icons or []) | tojson }};
+
+// MIL-STD-2525 / FTS CoT type presets: code -> common name (for table display and edit matching)
+const COT_PRESETS = {
+    '': 'Default (from aircraft)',
+    'a-f-A': 'Generic (air)',
+    'a-f-A-C': 'Civil (generic)',
+    'a-f-A-C-F': 'Civil fixed wing',
+    'a-f-A-C-H': 'Civil rotary',
+    'a-f-A-C-L': 'Civil LTA',
+    'a-f-A-C-F-q': 'Civil UAV',
+    'a-f-A-M': 'Military (generic)',
+    'a-f-A-M-F': 'Military fixed wing',
+    'a-f-A-M-H': 'Military rotary',
+    'a-f-A-M-L': 'Military LTA',
+    'a-f-A-M-F-Q': 'Military UAV',
+    'a-f-A-U': 'Unknown air (TIS-B)',
+};
+function cotDisplayName(cot) {
+    if (cot == null || String(cot).trim() === '') return '—';
+    const name = COT_PRESETS[String(cot).trim()];
+    return name ? name + ' (' + escapeHtml(cot) + ')' : escapeHtml(cot);
+}
+function getCotValueFromForm() {
+    const preset = document.getElementById('t-cot-preset').value;
+    if (preset === '__custom__') return document.getElementById('t-cot-custom').value.trim();
+    return preset || '';
+}
+function setCotValueInForm(cot) {
+    const s = (cot || '').trim();
+    const presetEl = document.getElementById('t-cot-preset');
+    const customEl = document.getElementById('t-cot-custom');
+    if (COT_PRESETS.hasOwnProperty(s)) {
+        presetEl.value = s;
+        customEl.style.display = 'none';
+        customEl.value = '';
+    } else {
+        presetEl.value = '__custom__';
+        customEl.value = s;
+        customEl.style.display = 'block';
+    }
+}
+document.getElementById('t-cot-preset').addEventListener('change', function() {
+    document.getElementById('t-cot-custom').style.display = this.value === '__custom__' ? 'block' : 'none';
+});
+
+// Table filter state and CoT filter dropdown (presets; "All" = no filter, "" = Default from aircraft)
+(function initFilterCotOptions() {
+    const sel = document.getElementById('filter-cot');
+    sel.innerHTML = '<option value="__all__">All</option><option value="">Default (from aircraft)</option>';
+    Object.keys(COT_PRESETS).forEach(code => {
+        if (code === '') return;
+        const opt = document.createElement('option');
+        opt.value = code;
+        opt.textContent = COT_PRESETS[code];
+        sel.appendChild(opt);
+    });
+})();
+
+let filterDebounceTimer = null;
+function getFilterValues() {
+    return {
+        hex: document.getElementById('filter-hex').value.trim(),
+        callsign: document.getElementById('filter-callsign').value.trim(),
+        type: (function() { const v = document.getElementById('filter-type').value; return v === '' ? null : v; })(),
+        domain: (function() { const v = document.getElementById('filter-domain').value; return v === '' ? null : v; })(),
+        agency: (function() { const v = document.getElementById('filter-agency').value; return v === '' ? null : v; })(),
+        reg: document.getElementById('filter-reg').value.trim(),
+        model: document.getElementById('filter-model').value.trim(),
+        cot: (function() { const v = document.getElementById('filter-cot').value; return v === '__all__' ? null : v; })(),
+    };
+}
+function applyFilters() {
+    currentPage = 1;
+    loadTransforms();
+}
+function clearFilters() {
+    document.getElementById('filter-hex').value = '';
+    document.getElementById('filter-callsign').value = '';
+    document.getElementById('filter-type').value = '';
+    document.getElementById('filter-domain').value = '';
+    document.getElementById('filter-agency').value = '';
+    document.getElementById('filter-reg').value = '';
+    document.getElementById('filter-model').value = '';
+    document.getElementById('filter-cot').value = '__all__';
+    applyFilters();
+}
+function wireFilterInputs() {
+    ['hex','callsign','reg','model'].forEach(f => {
+        const el = document.getElementById('filter-' + f);
+        if (!el) return;
+        el.addEventListener('input', function() {
+            if (filterDebounceTimer) clearTimeout(filterDebounceTimer);
+            filterDebounceTimer = setTimeout(applyFilters, 300);
+        });
+    });
+    ['type','domain','agency','cot'].forEach(f => {
+        const el = document.getElementById('filter-' + f);
+        if (!el) return;
+        el.addEventListener('change', applyFilters);
+    });
+    const clearBtn = document.getElementById('filter-clear-btn');
+    if (clearBtn) clearBtn.addEventListener('click', clearFilters);
+}
+async function loadFacets() {
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/facets');
+        const d = await r.json();
+        const typeSel = document.getElementById('filter-type');
+        const domainSel = document.getElementById('filter-domain');
+        const agencySel = document.getElementById('filter-agency');
+        (d.type || []).forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; typeSel.appendChild(o); });
+        (d.domain || []).forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; domainSel.appendChild(o); });
+        (d.agency || []).forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; agencySel.appendChild(o); });
+    } catch (e) { console.error('Failed to load facets', e); }
+}
+
+let currentPage = 1;
+let totalPages = 1;
+let totalCount = 0;
+let currentPerPage = 100;
+let currentSort = 'hex';
+let currentOrder = 'asc';
+
+function updatePassAllDescription() {
+    const el = document.getElementById('pass-all-description');
+    const on = document.getElementById('pass-all-toggle').checked;
+    if (el) el.textContent = on
+        ? 'All traffic is sent — every aircraft is forwarded; transform rules still apply to those that have them.'
+        : 'Only transformed data is sent — aircraft that have a transform rule are sent; all other traffic is filtered out.';
+}
+
+async function savePassAll() {
+    const on = document.getElementById('pass-all-toggle').checked;
+    outputConfig.pass_all = on;
+    try {
+        const r = await fetch('/api/outputs/' + outputId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: outputConfig })
+        });
+        if (!r.ok) throw new Error((await r.json()).error || 'Save failed');
+    } catch (e) {
+        console.error('Failed to save pass_all', e);
+        document.getElementById('pass-all-toggle').checked = !on;
+        outputConfig.pass_all = !on;
+        updatePassAllDescription();
+    }
+}
+
+document.getElementById('pass-all-toggle').checked = outputConfig.pass_all === true;
+updatePassAllDescription();
+document.getElementById('pass-all-toggle').addEventListener('change', function() {
+    updatePassAllDescription();
+    savePassAll();
+});
+
+function updatePassOnlyTisbToggle() {
+    const el = document.getElementById('pass-only-tisb-toggle');
+    if (!el) return;
+    el.checked = outputConfig.pass_only_tisb === true;
+}
+
+async function savePassOnlyTisb() {
+    const el = document.getElementById('pass-only-tisb-toggle');
+    if (!el) return;
+    const on = el.checked;
+    outputConfig.pass_only_tisb = on;
+    try {
+        const r = await fetch('/api/outputs/' + outputId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: outputConfig })
+        });
+        if (!r.ok) throw new Error((await r.json()).error || 'Save failed');
+    } catch (e) {
+        console.error('Failed to save pass_only_tisb', e);
+        el.checked = !on;
+        outputConfig.pass_only_tisb = !on;
+    }
+}
+
+updatePassOnlyTisbToggle();
+const passOnlyTisbEl = document.getElementById('pass-only-tisb-toggle');
+if (passOnlyTisbEl) {
+    passOnlyTisbEl.addEventListener('change', function() { savePassOnlyTisb(); });
+}
+
+function updateDistressHostileToggle() {
+    const el = document.getElementById('distress-hostile-toggle');
+    if (!el) return;
+    el.checked = outputConfig.distress_hostile === true;
+}
+
+async function saveDistressHostile() {
+    const el = document.getElementById('distress-hostile-toggle');
+    if (!el) return;
+    const on = el.checked;
+    outputConfig.distress_hostile = on;
+    try {
+        const r = await fetch('/api/outputs/' + outputId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: outputConfig })
+        });
+        if (!r.ok) throw new Error((await r.json()).error || 'Save failed');
+    } catch (e) {
+        console.error('Failed to save distress_hostile', e);
+        el.checked = !on;
+        outputConfig.distress_hostile = !on;
+    }
+}
+
+updateDistressHostileToggle();
+const distressEl = document.getElementById('distress-hostile-toggle');
+if (distressEl) {
+    distressEl.addEventListener('change', function() { saveDistressHostile(); });
+}
+
+document.getElementById('include-icon-in-cot-toggle').checked = outputConfig.include_icon_in_cot !== false;
+const cotStaleEl = document.getElementById('cot-stale-seconds');
+if (cotStaleEl) {
+    const v = outputConfig.cot_stale_seconds;
+    cotStaleEl.value = (v != null && Number.isFinite(Number(v))) ? String(Math.min(300, Math.max(5, Number(v)))) : '30';
+    cotStaleEl.addEventListener('change', async function() {
+        const n = parseInt(cotStaleEl.value, 10);
+        if (!Number.isFinite(n) || n < 5 || n > 300) return;
+        outputConfig.cot_stale_seconds = n;
+        try {
+            const r = await fetch('/api/outputs/' + outputId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: outputConfig }) });
+            if (!r.ok) throw new Error((await r.json()).error || 'Save failed');
+        } catch (e) { console.error('Failed to save cot_stale_seconds', e); }
+    });
+}
+async function saveIncludeIconInCot() {
+    const on = document.getElementById('include-icon-in-cot-toggle').checked;
+    outputConfig.include_icon_in_cot = on;
+    try {
+        const r = await fetch('/api/outputs/' + outputId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: outputConfig })
+        });
+        if (!r.ok) throw new Error((await r.json()).error || 'Save failed');
+    } catch (e) {
+        console.error('Failed to save include_icon_in_cot', e);
+        document.getElementById('include-icon-in-cot-toggle').checked = !on;
+        outputConfig.include_icon_in_cot = !on;
+    }
+}
+document.getElementById('include-icon-in-cot-toggle').addEventListener('change', saveIncludeIconInCot);
+
+function iconUrlForPath(iconPath) {
+    if (!iconPath) return null;
+    const s = String(iconPath).trim();
+    const icon = psAirIcons.find(i => s === i.path || s.endsWith(i.name) || s.includes('Public Safety Air/' + i.name));
+    if (icon) return icon.url_path;
+    if (s.startsWith('cot_ref_icons/')) {
+        const rest = s.slice('cot_ref_icons/'.length);
+        return '/static/cot_ref_icons/' + encodeURIComponent(rest);
+    }
+    return null;
+}
+
+function pickIcon(path, cot) {
+    document.getElementById('t-icon').value = path || '';
+    setCotValueInForm(cot || '');
+}
+
+function renderIconCell(t) {
+    const url = iconUrlForPath(t.icon);
+    if (url) return '<img src="' + escapeHtml(url) + '" alt="" title="' + escapeHtml(t.icon || '') + '" style="width:24px;height:24px;object-fit:contain;vertical-align:middle;">';
+    return '<span style="max-width:120px;overflow:hidden;text-overflow:ellipsis;display:inline-block;" title="' + escapeHtml(t.icon || '') + '">' + escapeHtml((t.icon || '').slice(0, 28)) + ((t.icon || '').length > 28 ? '…' : '') + '</span>';
+}
+
+function loadPsAirIcons() {
+    const grid = document.getElementById('ps-air-ref-grid');
+    const picker = document.getElementById('modal-icon-picker');
+    if (!grid || !picker) return;
+    const uid = '66f14976-4b62-4023-8edb-d8d2ebeaa336';
+    const folder = 'Public Safety Air';
+    function iconDisplayName(name) {
+        return (name || '').replace(/\.png$/i, '').replace(/_/g, ' ');
+    }
+    psAirIcons.forEach(ico => {
+        const path = ico.path || (uid + '/' + folder + '/' + ico.name);
+        const cot = ico.cot || '';
+        const displayName = iconDisplayName(ico.name);
+        function addCell(container) {
+            const cell = document.createElement('div');
+            cell.className = 'icon-cell';
+            cell.dataset.path = path;
+            cell.dataset.cot = cot;
+            cell.title = path;
+            cell.innerHTML = '<img src="' + escapeHtml(ico.url_path) + '" alt=""><span>' + escapeHtml(displayName) + '</span>';
+            cell.addEventListener('click', function() { pickIcon(this.dataset.path, this.dataset.cot); });
+            container.appendChild(cell);
+        }
+        addCell(grid);
+        addCell(picker);
+    });
+    if (!psAirIcons.length) {
+        grid.innerHTML = '<span style="color:var(--text-muted);">No icons loaded.</span>';
+        picker.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">No icons loaded.</span>';
+    }
+}
+
+function showCsvImportModal(state, message) {
+    const modal = document.getElementById('csv-import-modal');
+    document.getElementById('csv-import-processing').style.display = state === 'processing' ? 'block' : 'none';
+    document.getElementById('csv-import-success').style.display = state === 'success' ? 'block' : 'none';
+    document.getElementById('csv-import-failure').style.display = state === 'failure' ? 'block' : 'none';
+    document.getElementById('csv-import-modal-title').textContent = state === 'processing' ? 'Importing CSV' : (state === 'success' ? 'Import complete' : 'Import failed');
+    document.getElementById('csv-import-success-msg').textContent = message || '';
+    document.getElementById('csv-import-failure-msg').textContent = message || '';
+    modal.classList.add('show');
+}
+
+function dismissCsvImportModal() {
+    document.getElementById('csv-import-modal').classList.remove('show');
+    document.getElementById('csv-file').value = '';
+}
+
+document.getElementById('csv-file').addEventListener('change', async function(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    showCsvImportModal('processing');
+    let text;
+    try {
+        text = await f.text();
+    } catch (err) {
+        showCsvImportModal('failure', 'Could not read file: ' + err.message);
+        e.target.value = '';
+        return;
+    }
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csv: text }),
+        });
+        const d = await r.json();
+        e.target.value = '';
+        if (d.inserted !== undefined) {
+            loadTransforms();
+            let msg = 'Imported ' + d.inserted + ' row(s).';
+            if (d.errors && d.errors.length) msg += ' Some rows had errors: ' + d.errors.slice(0, 3).join('; ') + (d.errors.length > 3 ? '…' : '');
+            showCsvImportModal('success', msg);
+        } else {
+            showCsvImportModal('failure', d.error || 'Import failed');
+        }
+    } catch (err) {
+        e.target.value = '';
+        showCsvImportModal('failure', 'Request failed: ' + err.message);
+    }
+});
+
+function updateBulkDeleteVisibility() {
+    const allCb = document.querySelectorAll('.transform-cb');
+    const checked = document.querySelectorAll('.transform-cb:checked');
+    const n = checked.length;
+    const allCount = allCb.length;
+    const allSelected = allCount > 0 && n === allCount;
+    const hasAny = allCount > 0;
+    document.getElementById('bulk-delete-btn-top').style.display = n ? 'inline-block' : 'none';
+    document.getElementById('bulk-delete-btn-bottom').style.display = n ? 'inline-block' : 'none';
+    document.getElementById('delete-all-btn-top').style.display = hasAny ? 'inline-block' : 'none';
+    document.getElementById('delete-all-btn-bottom').style.display = hasAny ? 'inline-block' : 'none';
+    document.getElementById('select-all-top').checked = allSelected;
+    document.getElementById('select-all-header').checked = allSelected;
+    document.getElementById('select-all-bottom').checked = allSelected;
+}
+
+function wireSelectAll() {
+    function setAll(checked) {
+        document.querySelectorAll('.transform-cb').forEach(cb => { cb.checked = checked; });
+        updateBulkDeleteVisibility();
+    }
+    document.getElementById('select-all-top').onclick = function() { setAll(this.checked); };
+    document.getElementById('select-all-header').onclick = function() { setAll(this.checked); };
+    document.getElementById('select-all-bottom').onclick = function() { setAll(this.checked); };
+    document.querySelectorAll('.transform-cb').forEach(cb => {
+        cb.onclick = updateBulkDeleteVisibility;
+    });
+}
+
+function showBulkDeleteModal(state, message) {
+    var modal = document.getElementById('bulk-delete-modal');
+    document.getElementById('bulk-delete-processing').style.display = state === 'processing' ? 'block' : 'none';
+    document.getElementById('bulk-delete-success').style.display = state === 'success' ? 'block' : 'none';
+    document.getElementById('bulk-delete-failure').style.display = state === 'failure' ? 'block' : 'none';
+    document.getElementById('bulk-delete-modal-title').textContent = state === 'processing' ? 'Removing transforms' : (state === 'success' ? 'Delete complete' : 'Delete failed');
+    document.getElementById('bulk-delete-success-msg').textContent = message || '';
+    document.getElementById('bulk-delete-failure-msg').textContent = message || '';
+    modal.classList.add('show');
+}
+
+function dismissBulkDeleteModal() {
+    document.getElementById('bulk-delete-modal').classList.remove('show');
+}
+
+async function bulkDeleteTransforms() {
+    const ids = Array.from(document.querySelectorAll('.transform-cb:checked')).map(cb => parseInt(cb.value, 10)).filter(Boolean);
+    if (!ids.length) return;
+    if (!confirm('Delete ' + ids.length + ' selected transform(s)?')) return;
+    showBulkDeleteModal('processing');
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/bulk-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: ids }),
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            showBulkDeleteModal('success', 'Removed ' + (d.deleted || ids.length) + ' transform(s).');
+            loadTransforms();
+            setTimeout(function() { dismissBulkDeleteModal(); }, 1500);
+        } else {
+            showBulkDeleteModal('failure', d.error || 'Delete failed');
+        }
+    } catch (e) {
+        showBulkDeleteModal('failure', 'Request failed: ' + e.message);
+    }
+}
+
+async function deleteAllTransforms() {
+    const countEl = document.getElementById('transform-count');
+    const n = parseInt((countEl && countEl.textContent) ? countEl.textContent.replace(/\D/g, '') : '0', 10) || 0;
+    if (!n) return;
+    if (!confirm('Delete all ' + n + ' transform(s)? This cannot be undone.')) return;
+    showBulkDeleteModal('processing');
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/bulk-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ delete_all: true }),
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            showBulkDeleteModal('success', 'Removed ' + (d.deleted || n) + ' transform(s).');
+            loadTransforms();
+            setTimeout(function() { dismissBulkDeleteModal(); }, 1500);
+        } else {
+            showBulkDeleteModal('failure', d.error || 'Delete failed');
+        }
+    } catch (e) {
+        showBulkDeleteModal('failure', 'Request failed: ' + e.message);
+    }
+}
+
+function buildTransformsUrl() {
+    const params = new URLSearchParams({ page: currentPage, per_page: currentPerPage, sort: currentSort, order: currentOrder });
+    const f = getFilterValues();
+    if (f.hex) params.set('filter_hex', f.hex);
+    if (f.callsign) params.set('filter_callsign', f.callsign);
+    if (f.type != null) params.set('filter_type', f.type);
+    if (f.domain != null) params.set('filter_domain', f.domain);
+    if (f.agency != null) params.set('filter_agency', f.agency);
+    if (f.reg) params.set('filter_reg', f.reg);
+    if (f.model) params.set('filter_model', f.model);
+    if (f.cot !== null) params.set('filter_cot', f.cot);
+    return '/api/outputs/' + outputId + '/cot-transforms?' + params.toString();
+}
+
+function updateSortArrows() {
+    ['hex','callsign','type','domain','agency','reg'].forEach(col => {
+        const el = document.getElementById('sort-' + col);
+        if (!el) return;
+        el.className = 'sort-arrow' + (currentSort === col ? ' ' + currentOrder : '');
+    });
+}
+
+function updatePaginationBar() {
+    const bar = document.getElementById('pagination-bar');
+    const rangeEl = document.getElementById('pagination-range');
+    const indicatorEl = document.getElementById('page-indicator');
+    const prevBtn = document.getElementById('page-prev');
+    const nextBtn = document.getElementById('page-next');
+    if (!totalCount) {
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = 'flex';
+    const start = (currentPage - 1) * currentPerPage + 1;
+    const end = Math.min(currentPage * currentPerPage, totalCount);
+    rangeEl.textContent = totalCount ? (start + '–' + end + ' of ' + totalCount) : '';
+    indicatorEl.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+    prevBtn.disabled = currentPage <= 1;
+    nextBtn.disabled = currentPage >= totalPages;
+    document.getElementById('per-page-select').value = String(currentPerPage);
+}
+
+function changePerPage() {
+    currentPerPage = parseInt(document.getElementById('per-page-select').value, 10) || 100;
+    currentPage = 1;
+    loadTransforms();
+}
+
+function goToPage(page) {
+    page = Math.max(1, Math.min(totalPages, page));
+    if (page === currentPage) return;
+    currentPage = page;
+    loadTransforms();
+}
+
+function wireSortHeaders() {
+    document.querySelectorAll('th.sortable').forEach(th => {
+        th.onclick = function() {
+            const sort = this.getAttribute('data-sort');
+            if (!sort) return;
+            if (currentSort === sort) currentOrder = currentOrder === 'asc' ? 'desc' : 'asc';
+            else { currentSort = sort; currentOrder = 'asc'; }
+            currentPage = 1;
+            loadTransforms();
+        };
+    });
+}
+
+async function loadTransforms() {
+    const tbody = document.getElementById('transforms-tbody');
+    const tfoot = document.getElementById('transforms-tfoot');
+    const bar = document.getElementById('pagination-bar');
+    try {
+        const r = await fetch(buildTransformsUrl());
+        const d = await r.json();
+        const items = d.transforms || [];
+        totalCount = d.total ?? 0;
+        currentPage = d.page ?? 1;
+        totalPages = d.total_pages ?? 1;
+        currentPerPage = d.per_page ?? 100;
+        document.getElementById('transform-count').textContent = totalCount + ' rule(s)';
+        tfoot.style.display = items.length ? 'table-footer-group' : 'none';
+        updatePaginationBar();
+        updateSortArrows();
+        if (!items.length && !totalCount) {
+            tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:24px;">No transforms. Add one or import CSV.</td></tr>';
+            document.getElementById('bulk-delete-btn-top').style.display = 'none';
+            document.getElementById('delete-all-btn-top').style.display = 'none';
+            return;
+        }
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:24px;">No results for this page.</td></tr>';
+        } else {
+            tbody.innerHTML = items.map(t => `
+                <tr>
+                    <td style="vertical-align:middle;"><input type="checkbox" class="transform-cb" value="${t.id}" title="Select"></td>
+                    <td><code style="font-size:12px;">${escapeHtml(t.hex || '')}</code></td>
+                    <td>${escapeHtml(t.callsign || '')}</td>
+                    <td>${escapeHtml(t.type || '')}</td>
+                    <td>${escapeHtml(t.domain || '')}</td>
+                    <td>${escapeHtml(t.agency || '')}</td>
+                    <td>${escapeHtml(t.reg || '')}</td>
+                    <td>${escapeHtml(t.model || '')}</td>
+                    <td style="font-size:12px;" title="${escapeHtml(t.cot || '')}">${cotDisplayName(t.cot)}</td>
+                    <td style="max-width:140px;">${renderIconCell(t)}</td>
+                    <td style="text-align:center;">${(t.video && String(t.video).trim()) ? 'Yes' : 'No'}</td>
+                    <td style="text-align:right;">
+                        <button class="btn" style="font-size:11px;padding:4px 8px;" onclick="openEditModal(${t.id})">Edit</button>
+                        <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;" onclick="deleteTransform(${t.id}, '${(t.hex || '').replace(/'/g, "\\'")}')">Delete</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        wireSelectAll();
+        wireSortHeaders();
+        updateBulkDeleteVisibility();
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="12" style="color:var(--red);text-align:center;padding:20px;">Failed to load</td></tr>';
+        tfoot.style.display = 'none';
+        bar.style.display = 'none';
+    }
+}
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function openAddModal() {
+    document.getElementById('transform-modal-title').textContent = 'Add transform';
+    document.getElementById('transform-id').value = '';
+    ['hex','callsign','type','domain','agency','reg','model','icon','remarks','video'].forEach(f => {
+        const el = document.getElementById('t-' + f);
+        if (el) el.value = '';
+    });
+    setCotValueInForm('');
+    document.getElementById('transform-modal-error').style.display = 'none';
+    document.getElementById('transform-modal').classList.add('show');
+}
+
+async function openEditModal(id) {
+    const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/' + id);
+    const d = await r.json();
+    const t = d.transform;
+    if (!t) return;
+    document.getElementById('transform-modal-title').textContent = 'Edit transform';
+    document.getElementById('transform-id').value = t.id;
+    document.getElementById('t-hex').value = t.hex || '';
+    document.getElementById('t-callsign').value = t.callsign || '';
+    document.getElementById('t-type').value = t.type || '';
+    setCotValueInForm(t.cot || '');
+    document.getElementById('t-domain').value = t.domain || '';
+    document.getElementById('t-agency').value = t.agency || '';
+    document.getElementById('t-reg').value = t.reg || '';
+    document.getElementById('t-model').value = t.model || '';
+    document.getElementById('t-icon').value = t.icon || '';
+    document.getElementById('t-remarks').value = t.remarks || '';
+    document.getElementById('t-video').value = t.video || '';
+    document.getElementById('transform-modal-error').style.display = 'none';
+    document.getElementById('transform-modal').classList.add('show');
+}
+
+function closeTransformModal() {
+    document.getElementById('transform-modal').classList.remove('show');
+}
+
+async function saveTransform() {
+    const errEl = document.getElementById('transform-modal-error');
+    errEl.style.display = 'none';
+    const id = document.getElementById('transform-id').value;
+    const payload = {
+        hex: document.getElementById('t-hex').value.trim().toUpperCase(),
+        callsign: document.getElementById('t-callsign').value.trim(),
+        type: document.getElementById('t-type').value.trim(),
+        cot: getCotValueFromForm(),
+        domain: document.getElementById('t-domain').value.trim(),
+        agency: document.getElementById('t-agency').value.trim(),
+        reg: document.getElementById('t-reg').value.trim(),
+        model: document.getElementById('t-model').value.trim(),
+        icon: document.getElementById('t-icon').value.trim(),
+        remarks: document.getElementById('t-remarks').value.trim(),
+        video: document.getElementById('t-video').value.trim(),
+    };
+    if (!payload.hex) { errEl.textContent = 'HEX is required.'; errEl.style.display = 'block'; return; }
+    const btn = document.getElementById('transform-save-btn');
+    btn.disabled = true;
+    try {
+        const url = id ? '/api/outputs/' + outputId + '/cot-transforms/' + id : '/api/outputs/' + outputId + '/cot-transforms';
+        const r = await fetch(url, {
+            method: id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (d.success || d.id) {
+            closeTransformModal();
+            loadTransforms();
+        } else {
+            errEl.textContent = d.error || 'Save failed';
+            errEl.style.display = 'block';
+        }
+    } catch (e) {
+        errEl.textContent = 'Request failed: ' + e;
+        errEl.style.display = 'block';
+    }
+    btn.disabled = false;
+}
+
+async function deleteTransform(id, hex) {
+    if (!confirm('Delete transform for ' + hex + '?')) return;
+    const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/' + id, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) loadTransforms();
+    else alert(d.error || 'Delete failed');
+}
+
+// ── CoTProxy duplicate detection + merge ─────────────────────────────────
+let cotDupState = {
+    scanGroups: [],
+    mismatchGroups: [],
+    currentIndex: 0,
+    currentGroup: null,
+    resolved: {},
+};
+
+function closeCotDuplicatesModal() {
+    document.getElementById('cot-dup-modal').classList.remove('show');
+}
+
+function showCotDupScanView() {
+    document.getElementById('cot-dup-scan-view').style.display = 'block';
+    document.getElementById('cot-dup-rectify-view').style.display = 'none';
+}
+
+function showCotDupRectifyView() {
+    document.getElementById('cot-dup-scan-view').style.display = 'none';
+    document.getElementById('cot-dup-rectify-view').style.display = 'block';
+}
+
+function showCotDupScanActionsScanning() {
+    document.getElementById('cot-dup-actions-scan').style.display = 'flex';
+    document.getElementById('cot-dup-actions-ready').style.display = 'none';
+}
+
+function showCotDupScanActionsReady() {
+    document.getElementById('cot-dup-actions-scan').style.display = 'none';
+    document.getElementById('cot-dup-actions-ready').style.display = 'flex';
+}
+
+function showCotDupAutoModal(state, message, isError) {
+    document.getElementById('cot-dup-auto-modal').classList.add('show');
+    document.getElementById('cot-dup-auto-processing').style.display = state === 'processing' ? 'block' : 'none';
+    document.getElementById('cot-dup-auto-result').style.display = state === 'result' ? 'block' : 'none';
+    const msgEl = document.getElementById('cot-dup-auto-message');
+    msgEl.style.color = isError ? 'var(--red)' : 'var(--text-primary)';
+    msgEl.textContent = message || '';
+}
+
+function closeCotDupAutoModal() {
+    document.getElementById('cot-dup-auto-modal').classList.remove('show');
+}
+
+function cotDupValueDisplay(v) {
+    if (v === null || v === undefined) return '—';
+    return String(v);
+}
+
+function cotDupTruncate(s, n) {
+    s = (s === null || s === undefined) ? '—' : String(s);
+    if (s.length <= n) return s;
+    return s.slice(0, n - 1) + '…';
+}
+
+async function openCotDuplicatesModal() {
+    cotDupState.scanGroups = [];
+    cotDupState.mismatchGroups = [];
+    cotDupState.currentIndex = 0;
+    cotDupState.currentGroup = null;
+    cotDupState.resolved = {};
+
+    showCotDupScanView();
+    showCotDupScanActionsScanning();
+    document.getElementById('cot-dup-scan-error').style.display = 'none';
+    document.getElementById('cot-dup-scan-error').textContent = '';
+    document.getElementById('cot-dup-scan-summary').textContent = 'Scanning for duplicates…';
+    document.getElementById('cot-dup-automerge-btn').disabled = true;
+    document.getElementById('cot-dup-rectify-btn').disabled = true;
+    document.getElementById('cot-dup-rectify-status').textContent = '';
+    document.getElementById('cot-dup-records-tbody').innerHTML =
+        '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:18px;">No records loaded.</td></tr>';
+    document.getElementById('cot-dup-resolve-fields').innerHTML = '';
+
+    document.getElementById('cot-dup-modal').classList.add('show');
+
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/duplicates/scan');
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'Scan failed');
+        const groups = d.groups || [];
+        cotDupState.scanGroups = groups;
+        cotDupState.mismatchGroups = groups.filter(g => !g.exact);
+        const exactCount = groups.filter(g => g.exact).length;
+        const mismatchCount = cotDupState.mismatchGroups.length;
+        if (!groups.length) {
+            document.getElementById('cot-dup-scan-summary').textContent = 'No duplicate HEX groups found.';
+            showCotDupScanActionsReady();
+            return;
+        }
+        document.getElementById('cot-dup-scan-summary').textContent =
+            `Found ${groups.length} duplicate HEX group(s): ${exactCount} exact match(es) and ${mismatchCount} needing resolution.`;
+        document.getElementById('cot-dup-automerge-btn').disabled = false;
+        document.getElementById('cot-dup-rectify-btn').disabled = mismatchCount === 0;
+        showCotDupScanActionsReady();
+    } catch (e) {
+        document.getElementById('cot-dup-scan-error').style.display = 'block';
+        document.getElementById('cot-dup-scan-error').textContent = 'Scan failed: ' + (e && e.message ? e.message : e);
+        showCotDupScanActionsReady();
+    }
+}
+
+async function cotDupAutomerge() {
+    showCotDupAutoModal('processing');
+    try {
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/duplicates/automerge', { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'Auto-merge failed');
+
+        const remaining = d.remaining_mismatched_groups || [];
+        cotDupState.mismatchGroups = remaining;
+        document.getElementById('cot-dup-rectify-btn').disabled = remaining.length === 0;
+        document.getElementById('cot-dup-scan-summary').textContent =
+            `Auto-merge complete. Merged ${d.merged_groups || 0} identical group(s), removed ${d.deleted_transforms || 0} duplicate row(s). Remaining mismatched groups: ${remaining.length}.`;
+        showCotDupAutoModal(
+            'result',
+            `Completed. Merged ${d.merged_groups || 0} identical group(s), removed ${d.deleted_transforms || 0} duplicate row(s). Remaining mismatched groups: ${remaining.length}.`,
+            false
+        );
+        loadTransforms();
+    } catch (e) {
+        showCotDupAutoModal('result', 'Auto merge failed: ' + (e && e.message ? e.message : e), true);
+    }
+}
+
+function cotDupNorm(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).trim();
+}
+
+function cotDupDistinctValues(rows, field) {
+    const out = [];
+    const seen = new Set();
+    (rows || []).forEach(r => {
+        const nv = cotDupNorm(r[field]);
+        if (seen.has(nv)) return;
+        seen.add(nv);
+        out.push(nv);
+    });
+    return out;
+}
+
+function cotDupRenderCurrentRectifyGroup() {
+    const grp = cotDupState.mismatchGroups[cotDupState.currentIndex];
+    cotDupState.currentGroup = grp || null;
+    cotDupState.resolved = {};
+
+    const subtitle = document.getElementById('cot-dup-rectify-subtitle');
+    const recordsTbody = document.getElementById('cot-dup-records-tbody');
+    const resolveFields = document.getElementById('cot-dup-resolve-fields');
+    const statusEl = document.getElementById('cot-dup-rectify-status');
+
+    if (!grp) {
+        subtitle.textContent = 'No mismatched groups to rectify.';
+        recordsTbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:18px;">No records loaded.</td></tr>';
+        resolveFields.innerHTML = '<div style="padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--text-muted);">Nothing to rectify.</div>';
+        statusEl.textContent = '';
+        return;
+    }
+
+    const rows = grp.rows || [];
+    subtitle.textContent = `HEX ${grp.hex} — record ${cotDupState.currentIndex + 1} of ${cotDupState.mismatchGroups.length}`;
+    statusEl.textContent = '';
+
+    recordsTbody.innerHTML = rows.map(r => `
+        <tr>
+            <td>${r.id}</td>
+            <td><code>${escapeHtml(r.hex || grp.hex || '')}</code></td>
+            <td>${escapeHtml(r.callsign || '')}</td>
+            <td>${escapeHtml(r.type || '')}</td>
+            <td>${escapeHtml(r.domain || '')}</td>
+            <td>${escapeHtml(r.agency || '')}</td>
+            <td>${escapeHtml(r.reg || '')}</td>
+            <td>${escapeHtml(r.model || '')}</td>
+            <td>${escapeHtml(r.cot || '')}</td>
+            <td title="${escapeHtml(r.icon || '')}">${escapeHtml(cotDupTruncate(r.icon || '', 28))}</td>
+            <td title="${escapeHtml(r.remarks || '')}">${escapeHtml(cotDupTruncate(r.remarks || '', 28))}</td>
+            <td>${(r.video && String(r.video).trim()) ? 'Yes' : ''}</td>
+        </tr>
+    `).join('');
+
+    const fieldOrder = ['hex', 'callsign', 'type', 'domain', 'agency', 'reg', 'model', 'cot', 'icon', 'remarks', 'video'];
+    const keepRow = rows[0] || {};
+    resolveFields.innerHTML = '';
+    fieldOrder.forEach(field => {
+        const distinct = cotDupDistinctValues(rows, field);
+        const exact = distinct.length <= 1;
+        const isHex = field === 'hex';
+        const baseVal = isHex ? cotDupNorm(grp.hex || keepRow.hex) : cotDupNorm(keepRow[field]);
+        cotDupState.resolved[field] = baseVal;
+
+        const label = field.toUpperCase();
+        if (isHex || exact) {
+            const roHtml = `
+                <div style="display:grid;grid-template-columns:170px 1fr;gap:10px;align-items:center;">
+                    <div style="font-size:12px;color:var(--text-muted);">${escapeHtml(label)}</div>
+                    <input class="form-control" value="${escapeHtml(baseVal)}" readonly>
+                </div>
+            `;
+            resolveFields.insertAdjacentHTML('beforeend', roHtml);
+        } else {
+            const options = distinct.map(v => {
+                const sel = v === baseVal ? 'selected' : '';
+                const optVal = v === '' ? '__NULL__' : v;
+                const disp = v === '' ? '(blank)' : v;
+                return `<option value="${escapeHtml(optVal)}" ${sel}>${escapeHtml(disp)}</option>`;
+            }).join('');
+            const id = `cot-dup-resolve-${field}`;
+            const selHtml = `
+                <div style="display:grid;grid-template-columns:170px 1fr;gap:10px;align-items:center;">
+                    <div style="font-size:12px;color:var(--text-muted);">${escapeHtml(label)} (mismatch)</div>
+                    <select id="${id}" class="form-control">
+                        ${options}
+                    </select>
+                </div>
+            `;
+            resolveFields.insertAdjacentHTML('beforeend', selHtml);
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('change', function() {
+                    cotDupState.resolved[field] = this.value === '__NULL__' ? '' : this.value;
+                });
+            }
+        }
+    });
+}
+
+function cotDupStartRectify() {
+    if (!cotDupState.mismatchGroups.length) {
+        document.getElementById('cot-dup-scan-error').style.display = 'block';
+        document.getElementById('cot-dup-scan-error').textContent = 'No mismatched duplicate groups to rectify.';
+        return;
+    }
+    cotDupState.currentIndex = 0;
+    showCotDupRectifyView();
+    cotDupRenderCurrentRectifyGroup();
+}
+
+async function cotDupMergeCurrentGroup(closeAfter) {
+    const grp = cotDupState.currentGroup;
+    if (!grp) {
+        if (closeAfter) closeCotDuplicatesModal();
+        return;
+    }
+    const rows = grp.rows || [];
+    if (!rows.length) {
+        if (closeAfter) closeCotDuplicatesModal();
+        return;
+    }
+    const keepId = rows[0].id;
+    const mergeBtn = document.getElementById('cot-dup-merge-btn');
+    mergeBtn.disabled = true;
+    document.getElementById('cot-dup-rectify-status').textContent = 'Merging…';
+
+    try {
+        const overrides = {};
+        ['callsign', 'type', 'domain', 'agency', 'reg', 'model', 'cot', 'icon', 'remarks', 'video'].forEach(f => {
+            const v = cotDupState.resolved[f];
+            overrides[f] = (v === null || v === undefined || String(v).trim() === '') ? null : String(v).trim();
+        });
+
+        const r = await fetch('/api/outputs/' + outputId + '/cot-transforms/duplicates/merge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                groups: [{
+                    hex: grp.hex,
+                    keep_id: keepId,
+                    overrides: overrides
+                }]
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'Merge failed');
+
+        document.getElementById('cot-dup-rectify-status').textContent = `Merged HEX ${grp.hex}. Removed ${d.deleted_transforms || 0} duplicate row(s).`;
+        cotDupState.mismatchGroups.splice(cotDupState.currentIndex, 1);
+        if (closeAfter) {
+            closeCotDuplicatesModal();
+            loadTransforms();
+            return;
+        }
+        if (!cotDupState.mismatchGroups.length) {
+            closeCotDuplicatesModal();
+            loadTransforms();
+            return;
+        }
+        if (cotDupState.currentIndex >= cotDupState.mismatchGroups.length) {
+            cotDupState.currentIndex = cotDupState.mismatchGroups.length - 1;
+        }
+        cotDupRenderCurrentRectifyGroup();
+        loadTransforms();
+    } catch (e) {
+        mergeBtn.disabled = false;
+        document.getElementById('cot-dup-rectify-status').textContent =
+            'Merge failed: ' + (e && e.message ? e.message : e);
+        return;
+    }
+    mergeBtn.disabled = false;
+}
+
+async function cotDupMergeAndNext() {
+    await cotDupMergeCurrentGroup(false);
+}
+
+function cotDupSkipCurrent() {
+    if (!cotDupState.mismatchGroups.length) {
+        closeCotDuplicatesModal();
+        return;
+    }
+    cotDupState.currentIndex += 1;
+    if (cotDupState.currentIndex >= cotDupState.mismatchGroups.length) {
+        // End of queue: exit with remaining uncorrected.
+        closeCotDuplicatesModal();
+        loadTransforms();
+        return;
+    }
+    cotDupRenderCurrentRectifyGroup();
+}
+
+async function cotDupFinish() {
+    await cotDupMergeCurrentGroup(true);
+}
+
+wireFilterInputs();
+loadFacets();
+loadCivilMilitaryRefs();
+loadPsAirIcons();
+loadTransforms();
+</script>
+{% endblock %}
