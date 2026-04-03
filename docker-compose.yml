@@ -1,0 +1,79 @@
+# TAKNET-PS AIS Aggregator — skeleton aligned with TAKNET-PS ADS-B Aggregator
+# Implement ais-core, web, api-server, then uncomment services.
+
+name: taknet-ais-aggregator
+
+services:
+
+  ais-proxy:
+    build:
+      context: ./ais-proxy
+      dockerfile: Dockerfile
+    container_name: taknet-ais-proxy
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - LISTEN_PORT=10110
+      - AIS_CORE_HOST=${AIS_CORE_HOST:-ais-core}
+      - AIS_CORE_PORT=${AIS_CORE_PORT:-4000}
+      - DB_PATH=/data/ais_aggregator.db
+      - NETBIRD_ENABLED=${NETBIRD_ENABLED:-true}
+      - NETBIRD_API_URL=${NETBIRD_API_URL:-}
+      - NETBIRD_API_TOKEN=${NETBIRD_API_TOKEN:-}
+      - NETBIRD_CIDR=${NETBIRD_CIDR:-100.64.0.0/10}
+      - GEOIP_ENABLED=${GEOIP_ENABLED:-true}
+    ports:
+      - "${AIS_FEEDER_PORT:-10110}:10110/tcp"
+    volumes:
+      - ais-db-data:/data
+    networks:
+      - taknet-ais-internal
+    depends_on:
+      ais-core:
+        condition: service_started
+
+  ais-core:
+    build:
+      context: ./ais-core
+      dockerfile: Dockerfile
+    container_name: taknet-ais-core
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - LISTEN_PORT=4000
+    volumes:
+      - ais-runtime:/run/ais
+    networks:
+      - taknet-ais-internal
+
+  # dashboard:
+  #   build:
+  #     context: ./web
+  #     dockerfile: Dockerfile
+  #   ...
+
+  # api:
+  #   build:
+  #     context: ./api-server
+  #   ...
+
+  # nginx:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "${WEB_PORT:-80}:80"
+  #   volumes:
+  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/conf.d:/etc/nginx/conf.d:ro
+  #   depends_on:
+  #     - dashboard
+
+volumes:
+  ais-db-data:
+    name: taknet-ais-db-data
+  ais-runtime:
+    name: taknet-ais-runtime
+
+networks:
+  taknet-ais-internal:
+    name: taknet-ais-internal
+    driver: bridge
