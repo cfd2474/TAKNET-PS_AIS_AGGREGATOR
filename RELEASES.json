@@ -1,5 +1,10 @@
 [
   {
+    "version": "0.1.1",
+    "date": "2026-04-02",
+    "notes": "Services: replace ADSBHub with network feeds (AIShub/AISstream). New API /api/settings/network_feeds and status key network_feeds; NETWORK_FEED_* env vars; output/CoT filtering uses shared remote-source detection."
+  },
+  {
     "version": "0.1.0",
     "date": "2026-04-02",
     "notes": "Initial AIS stack; dashboard parity with TAKNET-PS Aggregator web UI."

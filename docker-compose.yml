@@ -61,7 +61,6 @@ services:
       - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
       - READSB_HOST=${READSB_HOST:-ais-core}
       - NETWORK_FEEDS_STATUS_PATH=/app/var/network-feeds-status
-      - ADSBHUB_STATUS_PATH=/app/var/network-feeds-status
       - RESEND_ENABLED=${RESEND_ENABLED:-false}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-noreply@notify.tak-solutions.com}

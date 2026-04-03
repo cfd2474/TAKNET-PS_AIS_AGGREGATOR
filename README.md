@@ -11,8 +11,8 @@ Distributed **AIS** (marine vessel tracking) aggregation stack. The **`web/`** d
 | `beast-proxy` | **`ais-proxy`** — NMEA TCP from feeders |
 | `readsb` + `tar1090` | **`ais-core`** — decode + **`/data/vessels.json`** |
 | `mlat-server` | *(not used for AIS)* |
-| `aircraft-merger` + ADSBHub | **`vessel-merger`** + AIShub / AISstream *(when added)* |
-| `adsbhub-feeder` | Outbound feed services *(optional)* |
+| `aircraft-merger` + network hub | **`vessel-merger`** + AIShub / AISstream *(when added)* |
+| outbound feeder | Optional push to third-party aggregators |
 | Flask **`web/`** | **Same** — dashboard, inputs, config, outputs, API, tunnel |
 | `api-server` (`/v2/`) | **`api-server`** *(add when ready)* |
 | `nginx` | **`nginx`** *(optional front edge)* |
@@ -38,7 +38,9 @@ Environment highlights:
 
 - **`VESSELS_JSON_URL`** — merged or local JSON (default in Compose: `http://ais-core:4001/data/vessels.json`). Legacy **`AIRCRAFT_JSON_URL`** is still read as a fallback key for the same setting.
 - **`GITHUB_REPO`** — OTA updates clone target (default `cfd2474/TAKNET-PS_AIS_AGGREGATOR`).
-- **`NETWORK_FEEDS_STATUS_PATH`** / **`ADSBHUB_STATUS_PATH`** — shared directory for connector status files (same JSON shape as ADS-B ADSBHub status).
+- **`NETWORK_FEEDS_STATUS_PATH`** — shared directory for connector status files (`feed.json`, `receive.json`). Legacy **`ADSBHUB_STATUS_PATH`** is still read as a fallback for the same path.
+- **`NETWORK_FEED_OUTBOUND_ENABLED`** / **`NETWORK_FEED_INBOUND_ENABLED`** — toggles for Config → Services (legacy **`ADSBHUB_FEED_ENABLED`** / **`ADSBHUB_RECEIVE_ENABLED`** still honored if the new keys are unset).
+- **`AISSTREAM_API_KEY`**, **`AISHUB_POLL_URL`** — optional credentials for connector containers.
 
 ---
 

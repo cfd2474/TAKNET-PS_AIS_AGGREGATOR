@@ -36,8 +36,21 @@ VESSELS_JSON_URL = os.environ.get(
     os.environ.get("AIRCRAFT_JSON_URL", "http://ais-core:4001/data/vessels.json"),
 )
 # Shared volume: network feed connector status (AIShub receive, AISstream, etc.)
-NETWORK_FEEDS_STATUS_PATH = os.environ.get("NETWORK_FEEDS_STATUS_PATH", "/app/var/network-feeds-status")
-ADSBHUB_STATUS_PATH = os.environ.get("ADSBHUB_STATUS_PATH", NETWORK_FEEDS_STATUS_PATH)
+NETWORK_FEEDS_STATUS_PATH = os.environ.get(
+    "NETWORK_FEEDS_STATUS_PATH",
+    os.environ.get("ADSBHUB_STATUS_PATH", "/app/var/network-feeds-status"),
+)
+
+_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "network", "adsbhub"})
+_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "network")
+
+
+def _is_network_remote_source(src):
+    """True if vessel row came from AIShub, AISstream, or generic network ingest (legacy adsbhub tag included)."""
+    s = (src or "").strip().lower()
+    if s in _NETWORK_REMOTE_EXACT:
+        return True
+    return any(x in s for x in _NETWORK_REMOTE_SUBSTR)
 
 _start_time = time.time()
 
@@ -150,10 +163,28 @@ echo "DONE:$NEW_VER"
         _update_running = False
 
 
-def _get_adsbhub_connection_status():
-    """Read live feed/receive connection status from shared volume (written by feeder and merger)."""
-    feed_enabled = _read_env_bool("ADSBHUB_FEED_ENABLED", False)
-    receive_enabled = _read_env_bool("ADSBHUB_RECEIVE_ENABLED", False)
+def _read_network_feed_outbound_enabled():
+    raw = (_read_env_value("NETWORK_FEED_OUTBOUND_ENABLED", "") or "").strip().lower()
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    return _read_env_bool("ADSBHUB_FEED_ENABLED", False)
+
+
+def _read_network_feed_inbound_enabled():
+    raw = (_read_env_value("NETWORK_FEED_INBOUND_ENABLED", "") or "").strip().lower()
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    return _read_env_bool("ADSBHUB_RECEIVE_ENABLED", False)
+
+
+def _get_network_feeds_connection_status():
+    """Read live outbound/inbound connection status from shared volume (connectors + merger)."""
+    feed_enabled = _read_network_feed_outbound_enabled()
+    receive_enabled = _read_network_feed_inbound_enabled()
     out = {
         "feed_enabled": feed_enabled,
         "feed_connected": None,
@@ -163,7 +194,7 @@ def _get_adsbhub_connection_status():
         "receive_updated": None,
     }
     try:
-        feed_path = os.path.join(ADSBHUB_STATUS_PATH, "feed.json")
+        feed_path = os.path.join(NETWORK_FEEDS_STATUS_PATH, "feed.json")
         if os.path.exists(feed_path):
             with open(feed_path, "r") as f:
                 data = json.load(f)
@@ -172,7 +203,7 @@ def _get_adsbhub_connection_status():
     except Exception:
         pass
     try:
-        recv_path = os.path.join(ADSBHUB_STATUS_PATH, "receive.json")
+        recv_path = os.path.join(NETWORK_FEEDS_STATUS_PATH, "receive.json")
         if os.path.exists(recv_path):
             with open(recv_path, "r") as f:
                 data = json.load(f)
@@ -201,7 +232,7 @@ def status():
     aircraft = _get_aircraft_data()
     system = _get_system_info()
     activity = ActivityModel.get_recent(10)
-    adsbhub = _get_adsbhub_connection_status()
+    network_feeds = _get_network_feeds_connection_status()
 
     return jsonify({
         "site_name": SITE_NAME,
@@ -210,7 +241,7 @@ def status():
         "system": system,
         "activity": activity,
         "pending_users": UserModel.pending_count(),
-        "adsbhub": adsbhub,
+        "network_feeds": network_feeds,
     })
 
 
@@ -997,22 +1028,27 @@ def _read_env_value(key, default=""):
     return default
 
 
-# ── ADSBHub settings (Config → Services) ──────────────────────────────────────
+# ── Network feeds (AIShub / AISstream) — Config → Services ───────────────────
 
-@bp.route("/settings/adsbhub", methods=["GET"])
+@bp.route("/settings/network_feeds", methods=["GET"])
 @admin_required
-def get_adsbhub_settings():
-    """Return current ADSBHub feed/receive flags and client key from .env."""
+def get_network_feeds_settings():
+    """Return outbound/inbound toggles and credential presence from .env."""
+    ais_key = (_read_env_value("AISSTREAM_API_KEY", "") or "").strip()
+    hub_url = (_read_env_value("AISHUB_POLL_URL", "") or "").strip()
     return jsonify({
-        "feed_enabled": _read_env_bool("ADSBHUB_FEED_ENABLED", False),
-        "receive_enabled": _read_env_bool("ADSBHUB_RECEIVE_ENABLED", False),
-        "client_key": _read_env_value("ADSBHUB_CLIENT_KEY", ""),
+        "feed_enabled": _read_network_feed_outbound_enabled(),
+        "receive_enabled": _read_network_feed_inbound_enabled(),
+        "aisstream_api_key_present": bool(ais_key),
+        "aishub_poll_url_present": bool(hub_url),
+        "aisstream_api_key": "",
+        "aishub_poll_url": "",
     })
 
 
-def _restart_adsbhub_containers_background():
+def _restart_network_feed_containers_background():
     """Run container restarts in background so the HTTP request can return immediately."""
-    for name in ("taknet-aisstream-connector", "taknet-vessel-merger", "taknet-adsbhub-feeder", "taknet-aircraft-merger"):
+    for name in ("taknet-aisstream-connector", "taknet-vessel-merger"):
         try:
             restart_container(name)
         except Exception as e:
@@ -1020,33 +1056,38 @@ def _restart_adsbhub_containers_background():
 
 
 def _write_receive_enabled_to_volume(enabled):
-    """Write receive_enabled to shared volume so aircraft-merger drops ADSBHub data immediately when disabled."""
+    """Write receive_enabled to shared volume so merger drops inbound network data immediately when disabled."""
     try:
-        path = os.path.join(ADSBHUB_STATUS_PATH, "receive_enabled")
+        path = os.path.join(NETWORK_FEEDS_STATUS_PATH, "receive_enabled")
         with open(path, "w") as f:
             f.write("true" if enabled else "false")
     except Exception as e:
         print(f"[api] Write receive_enabled: {e}")
 
 
-@bp.route("/settings/adsbhub", methods=["POST"])
+@bp.route("/settings/network_feeds", methods=["POST"])
 @admin_required
-def set_adsbhub_settings():
-    """Update ADSBHub flags and client key in .env; write receive_enabled to shared volume; restart adsbhub-feeder and aircraft-merger in background."""
+def set_network_feeds_settings():
+    """Update network feed flags and optional secrets in .env; restart AIS connectors and vessel merger in background."""
     data = request.get_json() or {}
     feed = data.get("feed_enabled", False)
     receive = data.get("receive_enabled", False)
-    client_key = (data.get("client_key") or "").strip()
-    _persist_env_var("ADSBHUB_FEED_ENABLED", "true" if feed else "false")
-    _persist_env_var("ADSBHUB_RECEIVE_ENABLED", "true" if receive else "false")
-    _persist_env_var("ADSBHUB_CLIENT_KEY", client_key)
+    _persist_env_var("NETWORK_FEED_OUTBOUND_ENABLED", "true" if feed else "false")
+    _persist_env_var("NETWORK_FEED_INBOUND_ENABLED", "true" if receive else "false")
+    if "aisstream_api_key" in data:
+        key = (data.get("aisstream_api_key") or "").strip()
+        if key:
+            _persist_env_var("AISSTREAM_API_KEY", key)
+    if "aishub_poll_url" in data:
+        url = (data.get("aishub_poll_url") or "").strip()
+        if url:
+            _persist_env_var("AISHUB_POLL_URL", url)
     _write_receive_enabled_to_volume(receive)
-    # Restart containers in background so we don't timeout (restarts can take 30+ s each)
-    thread = threading.Thread(target=_restart_adsbhub_containers_background, daemon=True)
+    thread = threading.Thread(target=_restart_network_feed_containers_background, daemon=True)
     thread.start()
     return jsonify({
         "success": True,
-        "message": "ADSBHub settings saved. Services are restarting in the background (refresh containers in a moment).",
+        "message": "Network feed settings saved. Related services are restarting in the background (refresh containers in a moment).",
     })
 
 
@@ -1195,14 +1236,8 @@ def _get_aircraft_data():
             data = resp.json()
             vessels = data.get("vessels") or data.get("aircraft") or []
             with_pos = [v for v in vessels if "lat" in v and "lon" in v]
-            remote_sources = ("aishub", "aisstream", "adsbhub", "network")
-
-            def _is_remote(v):
-                s = (v.get("source") or "").lower()
-                return any(x in s for x in remote_sources) or s in remote_sources
-
-            direct = sum(1 for v in vessels if not _is_remote(v))
-            network = sum(1 for v in vessels if _is_remote(v))
+            direct = sum(1 for v in vessels if not _is_network_remote_source(v.get("source")))
+            network = sum(1 for v in vessels if _is_network_remote_source(v.get("source")))
             return {
                 "total": len(vessels),
                 "with_position": len(with_pos),
@@ -1980,7 +2015,7 @@ def _filter_aircraft_for_json_output(ac_list, config: dict):
     v = config.get("include_network_adsb", True)
     include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
     if not include_network:
-        ac_list = [a for a in ac_list if (a.get("source") or "").lower() != "adsbhub"]
+        ac_list = [a for a in ac_list if not _is_network_remote_source(a.get("source"))]
 
     # Optional range-limits filter (center/radius configured on the output itself)
     if config.get("range_limit_enabled"):
@@ -2066,7 +2101,7 @@ def output_range_point(lat, lon, radius_nm):
         data = resp.json()
         aircraft = data.get("aircraft", [])
         if not include_network:
-            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+            aircraft = [a for a in aircraft if not _is_network_remote_source(a.get("source"))]
         matched = []
         for a in aircraft:
             a_lat, a_lon = a.get("lat"), a.get("lon")
@@ -2129,7 +2164,7 @@ def output_range_query():
         data = resp.json()
         aircraft = data.get("aircraft", [])
         if not include_network:
-            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+            aircraft = [a for a in aircraft if not _is_network_remote_source(a.get("source"))]
         matched = []
         for a in aircraft:
             a_lat, a_lon = a.get("lat"), a.get("lon")
@@ -2201,7 +2236,7 @@ def output_adsb_direct_point(raw_key, lat, lon, radius_nm):
         data = resp.json()
         aircraft = data.get("aircraft", [])
         if not include_network:
-            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+            aircraft = [a for a in aircraft if not _is_network_remote_source(a.get("source"))]
 
         matched = []
         for a in aircraft:
@@ -2257,7 +2292,7 @@ def output_json_stream(raw_key):
     if _stream_config.get("range_api"):
         return jsonify({"error": "This key is for Range API, not Stream. Use /api/outputs/range/point/<lat>/<lon>/<radius_nm>?key=..."}), 400
 
-    # Output config: include_network_adsb False => only direct feeder traffic (exclude source=adsbhub)
+    # Output config: include_network_adsb False => only direct feeder traffic (exclude network ingest sources)
     config = _stream_config
     # Normalize to bool: checkbox unchecked => False; default True for backward compat
     v = config.get("include_network_adsb", True)
@@ -2272,7 +2307,7 @@ def output_json_stream(raw_key):
                             headers={"Access-Control-Allow-Origin": "*"})
         data = resp.json()
         aircraft = data.get("aircraft", [])
-        direct_only = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+        direct_only = [a for a in aircraft if not _is_network_remote_source(a.get("source"))]
         out = {"aircraft": direct_only, "now": data.get("now"), "messages": data.get("messages", 0)}
         body = json.dumps(out).encode()
         return Response(body, content_type="application/json",

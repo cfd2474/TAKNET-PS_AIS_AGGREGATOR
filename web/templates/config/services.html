@@ -3,33 +3,39 @@
 
 {% block content %}
 
-<!-- ADSBHub settings -->
+<!-- Network feeds (AIShub / AISstream) -->
 <div class="card" style="margin-bottom:16px;">
     <div class="card-header">
         <div>
-            <h3>ADSBHub</h3>
-            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Feed SBS to ADSBHub and/or receive merged aircraft. Set CLIENTKEY for feed.</p>
+            <h3>Network feeds</h3>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Enable outbound sharing and/or inbound AIShub and AISstream ingest. Connectors read <code>NETWORK_FEED_*</code> and credentials from <code>.env</code>.</p>
         </div>
-        <button class="btn btn-primary" id="adsbhub-save-btn" onclick="saveAdsbhub()" style="white-space:nowrap;">Save</button>
+        <button class="btn btn-primary" id="network-feeds-save-btn" onclick="saveNetworkFeeds()" style="white-space:nowrap;">Save</button>
     </div>
     <div style="padding:0 20px 20px;">
+        <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;margin-bottom:16px;">
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="network-feed-outbound" class="toggle">
+                <span>Outbound network feed</span>
+            </label>
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <input type="checkbox" id="network-feed-inbound" class="toggle">
+                <span>Inbound network feed (AIShub / AISstream)</span>
+            </label>
+        </div>
         <div style="margin-bottom:16px;">
-            <label for="adsbhub-client-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Station dynamic IP key (CLIENTKEY)</label>
-            <input type="password" id="adsbhub-client-key" class="form-control" placeholder="Paste key from ADSBHub Settings → New Station"
+            <label for="network-feed-aisstream-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">AISstream API key (<code>AISSTREAM_API_KEY</code>)</label>
+            <input type="password" id="network-feed-aisstream-key" class="form-control" placeholder="Paste API key from aisstream.io"
                    style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
-            <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">Required for feeding. Get it from ADSBHub after adding your station; add your server IP in Data Access for receive.</p>
+            <p id="network-feed-aisstream-key-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:center;">
-            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-                <input type="checkbox" id="adsbhub-feed" class="toggle">
-                <span>Feed to ADSBHub</span>
-            </label>
-            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-                <input type="checkbox" id="adsbhub-receive" class="toggle">
-                <span>Receive from ADSBHub</span>
-            </label>
+        <div style="margin-bottom:0;">
+            <label for="network-feed-aishub-url" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">AIShub poll URL (<code>AISHUB_POLL_URL</code>)</label>
+            <input type="password" id="network-feed-aishub-url" class="form-control" placeholder="https://data.aishub.net/ws.php?username=…&amp;format=1"
+                   style="max-width:520px;font-family:monospace;font-size:12px;" autocomplete="off">
+            <p id="network-feed-aishub-url-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>
         </div>
-        <p id="adsbhub-msg" style="font-size:12px;color:var(--text-muted);margin-top:12px;margin-bottom:0;"></p>
+        <p id="network-feeds-msg" style="font-size:12px;color:var(--text-muted);margin-top:12px;margin-bottom:0;"></p>
     </div>
 </div>
 
@@ -174,16 +180,30 @@
 
 {% block extra_scripts %}
 <script>
-async function loadAdsbhubSettings() {
+async function loadNetworkFeedsSettings() {
+    const msgEl = document.getElementById('network-feeds-msg');
+    const keyHint = document.getElementById('network-feed-aisstream-key-hint');
+    const urlHint = document.getElementById('network-feed-aishub-url-hint');
     try {
-        const r = await fetch('/api/settings/adsbhub');
+        const r = await fetch('/api/settings/network_feeds');
         const d = await r.json();
-        document.getElementById('adsbhub-feed').checked = !!d.feed_enabled;
-        document.getElementById('adsbhub-receive').checked = !!d.receive_enabled;
-        document.getElementById('adsbhub-client-key').value = d.client_key || '';
-        document.getElementById('adsbhub-msg').textContent = '';
+        document.getElementById('network-feed-outbound').checked = !!d.feed_enabled;
+        document.getElementById('network-feed-inbound').checked = !!d.receive_enabled;
+        document.getElementById('network-feed-aisstream-key').value = '';
+        document.getElementById('network-feed-aishub-url').value = '';
+        if (keyHint) {
+            keyHint.textContent = d.aisstream_api_key_present
+                ? 'API key is stored. Leave blank to keep it.'
+                : 'No API key stored yet.';
+        }
+        if (urlHint) {
+            urlHint.textContent = d.aishub_poll_url_present
+                ? 'Poll URL is stored. Paste a new value to replace it (cannot clear from UI).'
+                : 'No AIShub poll URL stored yet.';
+        }
+        msgEl.textContent = '';
     } catch (e) {
-        document.getElementById('adsbhub-msg').textContent = 'Could not load ADSBHub settings.';
+        msgEl.textContent = 'Could not load network feed settings.';
     }
 }
 
@@ -263,26 +283,30 @@ function removeResendPendingUserRecipient(idx) {
     renderResendPendingUserRecipients();
 }
 
-async function saveAdsbhub() {
-    const feed = document.getElementById('adsbhub-feed').checked;
-    const receive = document.getElementById('adsbhub-receive').checked;
-    const clientKey = document.getElementById('adsbhub-client-key').value.trim();
-    const btn = document.getElementById('adsbhub-save-btn');
-    const msgEl = document.getElementById('adsbhub-msg');
+async function saveNetworkFeeds() {
+    const feed = document.getElementById('network-feed-outbound').checked;
+    const receive = document.getElementById('network-feed-inbound').checked;
+    const aisKey = document.getElementById('network-feed-aisstream-key').value.trim();
+    const hubUrl = document.getElementById('network-feed-aishub-url').value.trim();
+    const btn = document.getElementById('network-feeds-save-btn');
+    const msgEl = document.getElementById('network-feeds-msg');
     btn.disabled = true;
-    msgEl.textContent = 'Saving and restarting ADSBHub services...';
+    msgEl.textContent = 'Saving and restarting network feed services...';
     msgEl.style.color = 'var(--accent)';
     try {
-        const r = await fetch('/api/settings/adsbhub', {
+        const body = { feed_enabled: feed, receive_enabled: receive, aisstream_api_key: aisKey };
+        if (hubUrl) body.aishub_poll_url = hubUrl;
+        const r = await fetch('/api/settings/network_feeds', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ feed_enabled: feed, receive_enabled: receive, client_key: clientKey })
+            body: JSON.stringify(body)
         });
         const d = await r.json();
         if (d.success) {
             msgEl.textContent = d.message || 'Saved.';
             msgEl.style.color = 'var(--green)';
             loadContainers();
+            await loadNetworkFeedsSettings();
         } else {
             msgEl.textContent = d.error || 'Save failed.';
             msgEl.style.color = 'var(--red)';
@@ -524,7 +548,7 @@ document.getElementById('logs-modal').addEventListener('click', function(e) {
     if (e.target === this) closeLogs();
 });
 
-loadAdsbhubSettings();
+loadNetworkFeedsSettings();
 loadResendMailSettings();
 loadCotPushSettings();
 loadContainers();

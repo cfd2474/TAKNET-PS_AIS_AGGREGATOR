@@ -44,6 +44,16 @@ if not _logger.handlers:
 log = _logger
 log.setLevel(logging.INFO)
 
+_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "network", "adsbhub"})
+_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "network")
+
+
+def _is_network_remote_source(src):
+    s = (src or "").strip().lower()
+    if s in _NETWORK_REMOTE_EXACT:
+        return True
+    return any(x in s for x in _NETWORK_REMOTE_SUBSTR)
+
 
 def _cot_phase_timing_env():
     """True when COT_PHASE_TIMING is set — also logs to gunicorn.error (in addition to optional UI buffer)."""
@@ -272,7 +282,7 @@ def _aircraft_is_distress(aircraft: dict) -> bool:
 COT_STALE_SECONDS = 30
 # ft/min per knot (for track slope from baro_rate and gs)
 FT_PER_MIN_PER_KNOT = 101.268
-# CoT <track speed="..."/> is m/s (TAK/ATAK); tar1090/ADSBHub `gs` is knots.
+# CoT <track speed="..."/> is m/s (TAK/ATAK); many ADS-B sources use knots for ground speed.
 MPS_PER_KNOT = 1852.0 / 3600.0
 
 
@@ -416,7 +426,7 @@ def filter_aircraft_for_output(aircraft_list, config):
     include_network = config.get("include_network_adsb", True)
 
     for ac in aircraft_list:
-        if not include_network and (ac.get("source") or "").lower() == "adsbhub":
+        if not include_network and _is_network_remote_source(ac.get("source")):
             continue
         lat = _parse_float(ac.get("lat"))
         lon = _parse_float(ac.get("lon"))
@@ -800,7 +810,7 @@ def _compute_cot_xml_parts(
         if icon_path and isinstance(icon_path, str) and icon_path.strip():
             icon_path_raw = icon_path.strip()
 
-    feed_type = "ADSBHub" if (aircraft.get("source") or "").strip().lower() == "adsbhub" else "direct feed"
+    feed_type = "network feed" if _is_network_remote_source(aircraft.get("source")) else "direct feed"
     rem_parts = ["taknet-ps", feed_type, f"Hex: {hex_code}"]
     if distress_desc:
         rem_parts.append(distress_desc)
