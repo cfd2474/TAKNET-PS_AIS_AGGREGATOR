@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block body_class %}page-map{% endblock %}
+{% block page_title %}Map{% endblock %}
+
+{% block topbar %}{% endblock %}
+
+{% block content %}
+<div class="iframe-toolbar">
+    <span id="map-vessel-count" style="font-size:13px;color:var(--text-secondary);">— vessels</span>
+    <span style="font-size:12px;color:var(--text-muted);">Live map UI can embed here (Leaflet / MapLibre) fed by <code>/data/vessels.json</code> or merged URL from <code>VESSELS_JSON_URL</code>.</span>
+</div>
+<div class="card" style="margin:16px;border-radius:0;flex:1;min-height:400px;display:flex;align-items:center;justify-content:center;background:var(--bg-card);">
+    <p style="color:var(--text-muted);font-size:14px;max-width:480px;text-align:center;line-height:1.5;">
+        AIS map view — same slot as tar1090 in the ADS-B aggregator. Wire your map component to vessel positions from the aggregator API or static JSON.
+    </p>
+</div>
+<script>
+(async function() {
+    try {
+        const r = await fetch('/api/status');
+        const d = await r.json();
+        const ac = d.aircraft || {};
+        const n = typeof ac === 'object' ? (ac.total || 0) : ac;
+        const el = document.getElementById('map-vessel-count');
+        if (el) el.textContent = n + ' vessels (approx)';
+    } catch (e) {}
+})();
+</script>
+{% endblock %}

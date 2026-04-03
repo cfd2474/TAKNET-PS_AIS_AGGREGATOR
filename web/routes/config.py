@@ -1,0 +1,173 @@
+"""Config routes — VPN, services, updates, diagnostics, users pages."""
+from flask import Blueprint, render_template, request, jsonify, abort
+from flask_login import current_user
+from models import UserModel
+from routes.auth_utils import admin_required, network_admin_required, login_required_any
+from services.approval_welcome_email import send_account_approved_welcome
+
+bp = Blueprint("config", __name__, url_prefix="/config")
+
+@bp.route("/")
+@admin_required
+def index():
+    return render_template("config/config.html")
+
+@bp.route("/vpn")
+@admin_required
+def vpn():
+    return render_template("config/vpn.html")
+
+@bp.route("/services")
+@admin_required
+def services():
+    return render_template("config/services.html")
+
+@bp.route("/updates")
+@admin_required
+def updates():
+    return render_template("config/updates.html")
+
+@bp.route("/health")
+@admin_required
+def health():
+    return render_template("config/health.html")
+
+@bp.route("/diagnostics")
+@network_admin_required
+def diagnostics():
+    return render_template("config/diagnostics.html")
+
+@bp.route("/users")
+@admin_required
+def users():
+    all_users = UserModel.get_all()
+    pending_users = UserModel.get_pending()
+    return render_template("config/users.html", users=all_users, pending_users=pending_users, roles=UserModel.ROLES)
+
+
+@bp.route("/users/<int:user_id>")
+@login_required_any
+def user_detail(user_id):
+    """Admin view for any user; non-admins can only view their own details."""
+    if int(user_id) != int(current_user.id) and current_user.role != "admin":
+        abort(403)
+
+    user = UserModel.get_by_id(int(user_id))
+    if not user:
+        abort(404)
+
+    feeder_claim_key = None
+    if int(user_id) == int(current_user.id):
+        feeder_claim_key = UserModel.ensure_feeder_claim_key(int(user_id))
+
+    return render_template(
+        "config/user_detail.html",
+        user=user,
+        can_reset_password=(current_user.role == "admin"),
+        can_delete_user=(
+            current_user.role == "admin" and int(user_id) != int(current_user.id)
+        ),
+        is_self=(int(user_id) == int(current_user.id)),
+        feeder_claim_key=feeder_claim_key,
+        roles=UserModel.ROLES,
+    )
+
+
+@bp.route("/users/<int:user_id>/profile", methods=["POST"])
+@admin_required
+def users_update_profile(user_id):
+    data = request.get_json() or {}
+    ok, msg = UserModel.update_profile(user_id, data)
+    if ok:
+        return jsonify({"success": True})
+    return jsonify({"error": msg}), 400
+
+
+# ── User management API (admin only) ─────────────────────────────────────────
+
+@bp.route("/users/create", methods=["POST"])
+@admin_required
+def users_create():
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    role = data.get("role", "viewer")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    ok, msg = UserModel.create(username, password, role)
+    if ok:
+        return jsonify({"success": True})
+    return jsonify({"error": msg}), 400
+
+
+@bp.route("/users/<int:user_id>/role", methods=["POST"])
+@admin_required
+def users_update_role(user_id):
+    # Prevent admin from removing their own admin role
+    if user_id == int(current_user.id):
+        return jsonify({"error": "Cannot change your own role"}), 400
+    data = request.get_json() or {}
+    role = data.get("role", "")
+    ok, msg = UserModel.update_role(user_id, role)
+    if ok:
+        return jsonify({"success": True})
+    return jsonify({"error": msg}), 400
+
+
+@bp.route("/users/<int:user_id>/reset-password", methods=["POST"])
+@admin_required
+def users_reset_password(user_id):
+    data = request.get_json() or {}
+    password = data.get("password", "").strip()
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    UserModel.update_password(user_id, password)
+    return jsonify({"success": True})
+
+
+@bp.route("/users/<int:user_id>/delete", methods=["POST"])
+@admin_required
+def users_delete(user_id):
+    if user_id == int(current_user.id):
+        return jsonify({"error": "Cannot delete your own account"}), 400
+    UserModel.delete(user_id)
+    return jsonify({"success": True})
+
+
+@bp.route("/users/<int:user_id>/approve", methods=["POST"])
+@admin_required
+def users_approve(user_id):
+    data = request.get_json(silent=True) or {}
+    role = data.get("role", "viewer")
+    existing = UserModel.get_by_id(user_id)
+    was_pending = bool(existing and (existing.get("status") or "") == "pending")
+    ok, msg = UserModel.approve(user_id, role)
+    if ok and was_pending:
+        try:
+            UserModel.ensure_feeder_claim_key(user_id)
+        except Exception:
+            pass
+        try:
+            send_account_approved_welcome(UserModel.get_by_id(user_id))
+        except Exception as e:
+            print(f"[config] Approval welcome email error: {e}")
+    return jsonify({"success": ok, "message": msg})
+
+
+@bp.route("/users/<int:user_id>/deny", methods=["POST"])
+@admin_required
+def users_deny(user_id):
+    ok, msg = UserModel.deny(user_id)
+    return jsonify({"success": ok, "message": msg})
+
+
+@bp.route("/users/clean", methods=["POST"])
+@admin_required
+def users_clean_database():
+    """Purge denied/rejected users so their usernames can be reused."""
+    deleted = UserModel.purge_denied_users()
+    return jsonify({"success": True, "deleted": deleted})

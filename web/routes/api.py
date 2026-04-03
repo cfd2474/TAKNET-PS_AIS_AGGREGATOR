@@ -1,0 +1,2505 @@
+"""API routes — JSON endpoints for dashboard data."""
+
+import json
+import re
+import math
+import os
+import queue
+import threading
+import time
+
+import psutil
+import requests as http_requests
+from flask import Blueprint, jsonify, request, Response, stream_with_context
+
+from models import FeederModel, ConnectionModel, ActivityModel, UpdateModel, UserModel, OutputModel, CotTransformModel, OutputCotCertModel
+from models import SETTINGS_KEY_COT_PHASE_TIMING_UI, get_setting, set_setting
+from models import enrich_feeder_mlat_display
+from models import filter_feeders_for_user, feeder_stats_from_rows, user_can_access_feeder
+from services.docker_service import (get_containers, restart_container, get_logs,
+                                      get_netbird_client_status, enroll_netbird,
+                                      disconnect_netbird, get_client as _get_docker_client)
+from services.vpn_service import get_combined_status
+from services.health_snapshot import get_health_history, get_host_snapshot
+from routes.auth_utils import login_required_any, network_admin_required, admin_required
+from flask_login import current_user
+
+bp = Blueprint("api", __name__, url_prefix="/api")
+
+READSB_HOST = os.environ.get("READSB_HOST", "ais-core")
+SITE_NAME = os.environ.get("SITE_NAME", "TAKNET-PS AIS Aggregator")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "cfd2474/TAKNET-PS_AIS_AGGREGATOR")
+INSTALL_DIR = os.environ.get("INSTALL_DIR", "/opt/taknet-ais-aggregator")
+# Merged vessels (local + optional AIShub/AISstream) when vessel-merger is used
+VESSELS_JSON_URL = os.environ.get(
+    "VESSELS_JSON_URL",
+    os.environ.get("AIRCRAFT_JSON_URL", "http://ais-core:4001/data/vessels.json"),
+)
+# Shared volume: network feed connector status (AIShub receive, AISstream, etc.)
+NETWORK_FEEDS_STATUS_PATH = os.environ.get("NETWORK_FEEDS_STATUS_PATH", "/app/var/network-feeds-status")
+ADSBHUB_STATUS_PATH = os.environ.get("ADSBHUB_STATUS_PATH", NETWORK_FEEDS_STATUS_PATH)
+
+_start_time = time.time()
+
+# ── Update streaming state ────────────────────────────────────────────────────
+_update_queue = queue.Queue()
+_update_running = False
+
+
+def _run_update():
+    """Background thread: clone from GitHub and deploy via docker:cli container (all writes go to host via bind mount)."""
+    global _update_running
+
+    def log(msg, log_type="log"):
+        for line in str(msg).splitlines():
+            line = line.strip()
+            if line:
+                _update_queue.put({"type": log_type, "msg": line})
+
+    old_ver = "unknown"
+    new_ver = "unknown"
+
+    try:
+        # Read current version from .env-mounted path
+        try:
+            old_ver = open(os.path.join(INSTALL_DIR, "VERSION")).read().strip()
+        except Exception:
+            pass
+
+        client = _get_docker_client()
+        if not client:
+            log("Docker not available", "error")
+            return
+
+        try:
+            client.images.pull("docker:cli")
+        except Exception:
+            pass
+
+        # Shell script that runs entirely inside docker:cli which has INSTALL_DIR
+        # bind-mounted from the host — so all file writes land on the host filesystem.
+        script = f"""
+set -e
+echo "Cloning https://github.com/{GITHUB_REPO}.git ..."
+TMPDIR=$(mktemp -d)
+git clone --depth 1 https://github.com/{GITHUB_REPO}.git $TMPDIR/repo
+echo "Clone complete."
+NEW_VER=$(cat $TMPDIR/repo/VERSION 2>/dev/null || echo unknown)
+echo "Updating to v$NEW_VER ..."
+# Copy all files except .git to INSTALL_DIR on the host
+cd $TMPDIR/repo
+for item in $(ls -A | grep -v '^[.]git$'); do
+    cp -r $item {INSTALL_DIR}/
+done
+rm -rf $TMPDIR
+echo "Files updated on host."
+echo "Pulling updated images..."
+cd {INSTALL_DIR}
+docker compose pull 2>&1
+echo "Building local images..."
+docker compose build dashboard ais-proxy ais-core api nginx 2>&1
+echo "PRE_RESTART"
+sleep 3
+echo "Restarting containers..."
+docker compose up -d 2>&1
+echo "DONE:$NEW_VER"
+"""
+
+        log("Starting update via docker:cli ...")
+
+        volumes = {
+            "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
+            INSTALL_DIR:            {"bind": INSTALL_DIR,            "mode": "rw"},
+        }
+        compose_container = client.containers.create(
+            "docker:cli",
+            command=["sh", "-c", script],
+            volumes=volumes,
+            working_dir=INSTALL_DIR,
+        )
+        compose_container.start()
+
+        for chunk in compose_container.logs(stream=True, follow=True):
+            line = chunk.decode("utf-8", errors="replace").strip()
+            if line.startswith("DONE:"):
+                new_ver = line.split(":", 1)[1]
+            elif line == "PRE_RESTART":
+                log("Dashboard will reconnect automatically after containers restart", "pre_restart")
+            elif line:
+                log(line)
+
+        result = compose_container.wait()
+        try:
+            compose_container.remove()
+        except Exception:
+            pass
+        exit_code = result.get("StatusCode", -1)
+
+        if exit_code == 0:
+            try:
+                UpdateModel.log_update(old_ver, new_ver, True, "Updated via web UI")
+            except Exception:
+                pass
+            log(f"✓ Update complete: v{old_ver} → v{new_ver}", "done")
+        else:
+            log(f"docker:cli exited with code {exit_code}", "error")
+
+    except Exception as e:
+        log(f"Update error: {e}", "error")
+    finally:
+        _update_running = False
+
+
+def _get_adsbhub_connection_status():
+    """Read live feed/receive connection status from shared volume (written by feeder and merger)."""
+    feed_enabled = _read_env_bool("ADSBHUB_FEED_ENABLED", False)
+    receive_enabled = _read_env_bool("ADSBHUB_RECEIVE_ENABLED", False)
+    out = {
+        "feed_enabled": feed_enabled,
+        "feed_connected": None,
+        "feed_updated": None,
+        "receive_enabled": receive_enabled,
+        "receive_connected": None,
+        "receive_updated": None,
+    }
+    try:
+        feed_path = os.path.join(ADSBHUB_STATUS_PATH, "feed.json")
+        if os.path.exists(feed_path):
+            with open(feed_path, "r") as f:
+                data = json.load(f)
+            out["feed_connected"] = data.get("connected", False)
+            out["feed_updated"] = data.get("updated")
+    except Exception:
+        pass
+    try:
+        recv_path = os.path.join(ADSBHUB_STATUS_PATH, "receive.json")
+        if os.path.exists(recv_path):
+            with open(recv_path, "r") as f:
+                data = json.load(f)
+            out["receive_connected"] = data.get("connected", False)
+            out["receive_updated"] = data.get("updated")
+    except Exception:
+        pass
+    return out
+
+
+# ── Status / Overview ────────────────────────────────────────────────────────
+
+@bp.route("/status")
+@login_required_any
+def status():
+    """Dashboard overview data."""
+    if current_user.role == "admin":
+        feeder_stats = FeederModel.get_stats()
+    elif current_user.role == "network_admin":
+        visible = filter_feeders_for_user(
+            FeederModel.get_all(), current_user.username, current_user.role
+        )
+        feeder_stats = feeder_stats_from_rows(visible)
+    else:
+        feeder_stats = FeederModel.get_stats()
+    aircraft = _get_aircraft_data()
+    system = _get_system_info()
+    activity = ActivityModel.get_recent(10)
+    adsbhub = _get_adsbhub_connection_status()
+
+    return jsonify({
+        "site_name": SITE_NAME,
+        "feeders": feeder_stats,
+        "aircraft": aircraft,
+        "system": system,
+        "activity": activity,
+        "pending_users": UserModel.pending_count(),
+        "adsbhub": adsbhub,
+    })
+
+
+# ── Feeders ──────────────────────────────────────────────────────────────────
+
+@bp.route("/feeders")
+@network_admin_required
+def feeders_list():
+    """List all feeders with optional filters."""
+    status_filter = request.args.get("status", "all")
+    conn_type = request.args.get("conn_type", "all")
+    feeders = FeederModel.get_all(status_filter=status_filter, conn_type_filter=conn_type)
+    feeders = filter_feeders_for_user(
+        feeders, current_user.username, current_user.role
+    )
+    stats = (
+        FeederModel.get_stats()
+        if current_user.role == "admin"
+        else feeder_stats_from_rows(feeders)
+    )
+    out = []
+    for f in feeders:
+        e = enrich_feeder_mlat_display(f)
+        e["can_tunnel"] = user_can_access_feeder(f, current_user.username, current_user.role)
+        out.append(e)
+    return jsonify({"feeders": out, "stats": stats})
+
+
+@bp.route("/users/usernames")
+@admin_required
+def users_usernames_for_feeders():
+    """Active usernames for assigning feeder owners (admin only)."""
+    users = UserModel.get_all()
+    names = [
+        u["username"]
+        for u in users
+        if (u.get("status") or "active") == "active" and u.get("username")
+    ]
+    return jsonify({"usernames": sorted(set(names))})
+
+
+@bp.route("/feeders/<int:feeder_id>")
+@network_admin_required
+def feeder_detail(feeder_id):
+    """Single feeder with full details."""
+    feeder = FeederModel.get_by_id(feeder_id)
+    if not feeder:
+        return jsonify({"error": "Feeder not found"}), 404
+    if not user_can_access_feeder(feeder, current_user.username, current_user.role):
+        return jsonify({"error": "Feeder not found"}), 404
+    feeder = enrich_feeder_mlat_display(feeder)
+    connections = ConnectionModel.get_history(feeder_id, limit=20)
+    return jsonify({"feeder": feeder, "connections": connections})
+
+
+@bp.route("/feeders/<int:feeder_id>", methods=["PUT"])
+@network_admin_required
+def feeder_update(feeder_id):
+    """Update feeder metadata."""
+    row = FeederModel.get_by_id(feeder_id)
+    if not row:
+        return jsonify({"error": "Feeder not found"}), 404
+    if not user_can_access_feeder(row, current_user.username, current_user.role):
+        return jsonify({"error": "Feeder not found"}), 404
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data"}), 400
+    if current_user.role != "admin":
+        data.pop("owners", None)
+        data.pop("owners_locked", None)
+    allow_owners = current_user.role == "admin"
+    ok = FeederModel.update(feeder_id, data, allow_owners=allow_owners)
+    if ok:
+        return jsonify({"success": True})
+    return jsonify({"error": "Update failed"}), 400
+
+
+@bp.route("/feeders/<int:feeder_id>/suggest-name")
+@network_admin_required
+def feeder_suggest_name(feeder_id):
+    """Return a suggested name in CC-ST-City format.
+    Uses MLAT GPS coordinates if available, falls back to IP geolocation.
+    """
+    feeder = FeederModel.get_by_id(feeder_id)
+    if not feeder:
+        return jsonify({"error": "Feeder not found"}), 404
+    if not user_can_access_feeder(feeder, current_user.username, current_user.role):
+        return jsonify({"error": "Feeder not found"}), 404
+
+    lat  = feeder.get("latitude")
+    lon  = feeder.get("longitude")
+    ip   = feeder.get("ip_address", "")
+
+    def _alpha3(alpha2):
+        try:
+            import pycountry
+            c = pycountry.countries.get(alpha_2=(alpha2 or "").upper())
+            return c.alpha_3 if c else (alpha2 or "").upper()
+        except Exception:
+            return (alpha2 or "").upper()
+
+    def _format_name(country_a2, state, city):
+        """Build AAA-FullState-FullCity slug."""
+        import re
+        def slugify(s):
+            return re.sub(r"[^a-z0-9\-]", "", (s or "").lower().replace(" ", "-"))
+        parts = [p for p in [slugify(_alpha3(country_a2)), slugify(state), slugify(city)] if p]
+        return "-".join(parts)
+
+    # ── Method 1: GPS coordinates via Nominatim reverse geocode ──────────────
+    if lat is not None and lon is not None:
+        try:
+            resp = http_requests.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "json", "zoom": 10},
+                headers={"User-Agent": "TAKNET-PS-Aggregator/1.0"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                addr = resp.json().get("address", {})
+                country_a2 = addr.get("country_code", "")
+                state      = (addr.get("state") or addr.get("province") or
+                              addr.get("region") or "")
+                city       = (addr.get("city") or addr.get("town") or
+                              addr.get("village") or addr.get("county") or "")
+                name = _format_name(country_a2, state, city)
+                if name:
+                    return jsonify({"name": name, "source": "gps"})
+        except Exception:
+            pass  # fall through to IP lookup
+
+    # ── Method 2: IP geolocation via ip-api.com (free, no key) ──────────────
+    # Skip private/RFC1918 and NetBird ranges
+    import ipaddress as _ipaddress
+    try:
+        addr_obj = _ipaddress.ip_address(ip)
+        if addr_obj.is_private or addr_obj.is_loopback:
+            return jsonify({"error": "No GPS coordinates and IP is private — cannot geolocate"}), 422
+    except ValueError:
+        return jsonify({"error": "Invalid IP address"}), 422
+
+    try:
+        resp = http_requests.get(
+            f"http://ip-api.com/json/{ip}",
+            params={"fields": "countryCode,region,city,status,message"},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "success":
+                name = _format_name(
+                    data.get("countryCode", ""),
+                    data.get("region", ""),   # full state/province name
+                    data.get("city", ""),
+                )
+                if name:
+                    return jsonify({"name": name, "source": "ip"})
+            return jsonify({"error": data.get("message", "IP geolocation failed")}), 422
+    except Exception as e:
+        return jsonify({"error": f"IP geolocation failed: {e}"}), 500
+
+    return jsonify({"error": "Could not determine location"}), 422
+
+
+@bp.route("/feeders/<int:feeder_id>", methods=["DELETE"])
+@admin_required
+def feeder_delete(feeder_id):
+    """Delete a feeder."""
+    FeederModel.delete(feeder_id)
+    return jsonify({"success": True})
+
+
+@bp.route("/feeders/<int:feeder_id>/merge", methods=["POST"])
+@admin_required
+def feeder_merge(feeder_id):
+    """Merge a duplicate feeder record into a target feeder, then delete it.
+    Body: { "into": <target_feeder_id> }
+    Moves connection history to the target, then deletes this record.
+    """
+    data = request.get_json(silent=True) or {}
+    into_id = data.get("into")
+    if not into_id:
+        return jsonify({"error": "Missing 'into' feeder id"}), 400
+    if int(into_id) == feeder_id:
+        return jsonify({"error": "Cannot merge a feeder into itself"}), 400
+
+    from models import get_db
+    conn = get_db()
+    try:
+        # Re-parent connection history
+        conn.execute(
+            "UPDATE connections SET feeder_id = ? WHERE feeder_id = ?",
+            (into_id, feeder_id)
+        )
+        # Re-parent activity log
+        conn.execute(
+            "UPDATE activity_log SET feeder_id = ? WHERE feeder_id = ?",
+            (into_id, feeder_id)
+        )
+        # Delete the duplicate
+        conn.execute("DELETE FROM feeders WHERE id = ?", (feeder_id,))
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@bp.route("/feeders/purge-inactive", methods=["POST"])
+@admin_required
+def feeders_purge_inactive():
+    """Delete all non-active feeders (stale, offline)."""
+    count = FeederModel.purge_inactive()
+    return jsonify({"success": True, "deleted": count})
+
+
+@bp.route("/feeders/purge-old", methods=["POST"])
+@admin_required
+def feeders_purge_old():
+    """Delete feeders not seen in the last 24 hours."""
+    count = FeederModel.purge_old(hours=24)
+    return jsonify({"success": True, "deleted": count})
+
+
+@bp.route("/feeders/<int:feeder_id>/connections")
+@network_admin_required
+def feeder_connections(feeder_id):
+    """Connection history for a feeder."""
+    row = FeederModel.get_by_id(feeder_id)
+    if not row or not user_can_access_feeder(row, current_user.username, current_user.role):
+        return jsonify({"error": "Feeder not found"}), 404
+    limit = request.args.get("limit", 50, type=int)
+    connections = ConnectionModel.get_history(feeder_id, limit=limit)
+    return jsonify({"connections": connections})
+
+
+# ── Aircraft ─────────────────────────────────────────────────────────────────
+
+@bp.route("/aircraft")
+@login_required_any
+def aircraft():
+    """Current aircraft data from readsb."""
+    data = _get_aircraft_data()
+    return jsonify(data)
+
+
+@bp.route("/aircraft.json")
+@login_required_any
+def aircraft_json():
+    """Full aircraft.json from merger (for Merged map); avoids nginx /data/ routing."""
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if resp.status_code == 200:
+            return Response(resp.content, mimetype="application/json")
+    except Exception:
+        pass
+    return jsonify({"aircraft": [], "now": 0, "messages": 0})
+
+
+# ── Diagnostics ─────────────────────────────────────────────────────────
+
+_AIRCRAFT_JSON_CACHE = {"ts": 0.0, "data": None}
+_AIRCRAFT_JSON_CACHE_TTL_SEC = 1.0
+
+
+def _normalize_hex6(val) -> str | None:
+    """Extract the first 6 hex digits from a value (e.g. '~29AD8E' -> '29AD8E')."""
+    try:
+        s = str(val or "")
+    except Exception:
+        return None
+    m = re.search(r"([0-9A-Fa-f]{6})", s)
+    if not m:
+        return None
+    return m.group(1).upper()
+
+
+def _get_aircraft_json_cached_for_diag():
+    """Fetch and cache merger aircraft.json for short time windows (helps inspector typing)."""
+    import time as _time
+    now = _time.monotonic()
+    ent = _AIRCRAFT_JSON_CACHE
+    if ent.get("data") is not None and (now - float(ent.get("ts") or 0.0)) < _AIRCRAFT_JSON_CACHE_TTL_SEC:
+        return ent["data"]
+
+    resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+    resp.raise_for_status()
+    data = resp.json()
+    _AIRCRAFT_JSON_CACHE["ts"] = now
+    _AIRCRAFT_JSON_CACHE["data"] = data
+    return data
+
+
+@bp.route("/diagnostics/aircraft", methods=["GET"])
+@network_admin_required
+def diagnostics_aircraft():
+    """Return the raw aircraft entry from aircraft.json for a given `q` (hex or callsign)."""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "Missing query `q` (hex or callsign)"}), 400
+
+    aircraft_q = _normalize_hex6(q)
+    is_hex = aircraft_q is not None
+    callsign_q = q.strip().lower()
+
+    try:
+        data = _get_aircraft_json_cached_for_diag()
+        aircraft_list = data.get("aircraft") or data.get("vessels") or []
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch vessels.json: {e}"}), 502
+
+    matches = []
+    for a in aircraft_list:
+        if not isinstance(a, dict):
+            continue
+        if is_hex:
+            a_hex = _normalize_hex6(a.get("hex"))
+            if a_hex == aircraft_q:
+                matches.append(a)
+        else:
+            qn = q.strip().lower()
+            # MMSI (AIS)
+            mmsi = a.get("mmsi")
+            if mmsi is not None and str(mmsi).strip().lower() == qn:
+                matches.append(a)
+                continue
+            # callsign / name
+            flight = (a.get("flight") or "").strip().lower()
+            callsign = (a.get("callsign") or "").strip().lower()
+            name = (a.get("name") or "").strip().lower()
+            if flight == qn or callsign == qn or name == qn:
+                matches.append(a)
+
+    if not matches:
+        return jsonify({"error": "No track match found", "query": q, "matches": 0}), 404
+
+    return jsonify({
+        "query": q,
+        "matches": len(matches),
+        "aircraft": matches[0],
+        "vessel": matches[0],
+    })
+
+
+@bp.route("/diagnostics/output", methods=["GET"])
+@network_admin_required
+def diagnostics_output():
+    """Preview CoT output XML for a given aircraft `q` (hex or callsign)."""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "Missing query `q` (hex or callsign)"}), 400
+
+    aircraft_q = _normalize_hex6(q)
+    is_hex = aircraft_q is not None
+    callsign_q = q.lower()
+
+    try:
+        data = _get_aircraft_json_cached_for_diag()
+        aircraft_list = data.get("aircraft") or []
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch aircraft.json: {e}"}), 502
+
+    matches = []
+    for a in aircraft_list:
+        if not isinstance(a, dict):
+            continue
+        if is_hex:
+            a_hex = _normalize_hex6(a.get("hex"))
+            if a_hex == aircraft_q:
+                matches.append(a)
+        else:
+            flight = (a.get("flight") or "").strip().lower()
+            callsign = (a.get("callsign") or "").strip().lower()
+            if flight == callsign_q or callsign == callsign_q:
+                matches.append(a)
+
+    if not matches:
+        return jsonify({"error": "No aircraft match found", "query": q, "matches": 0}), 404
+
+    aircraft = matches[0]
+    hex_code = (aircraft.get("hex") or "").strip().upper()
+    if not hex_code:
+        return jsonify({"error": "Matched aircraft has no `hex` field", "query": q}), 400
+
+    # Build a preview for each active outbound CoT output configured in the system.
+    from cot_pipeline import build_cot_xml, get_transform_for_aircraft
+    import xml.etree.ElementTree as ET
+
+    outputs = OutputModel.get_for_user(current_user.id, current_user.role)
+    cot_outputs = [
+        o
+        for o in outputs
+        if (o.get("output_type") == "cot" and o.get("mode") == "push" and o.get("status") == "active")
+    ]
+
+    results = []
+    for o in cot_outputs:
+        output_id = o.get("id")
+        config_raw = o.get("config") or "{}"
+        try:
+            config = json.loads(config_raw) if isinstance(config_raw, str) else (config_raw or {})
+        except Exception:
+            config = {}
+        include_icon_in_cot = bool(config.get("include_icon_in_cot", True))
+        distress_hostile = bool(config.get("distress_hostile"))
+
+        transform = None
+        # CoT outputs always use COTProxy transforms.
+        try:
+            transform = get_transform_for_aircraft(int(output_id), hex_code)
+        except Exception:
+            transform = None
+
+        try:
+            cot_xml = build_cot_xml(
+                aircraft,
+                transform=transform,
+                include_icon_in_cot=include_icon_in_cot,
+                distress_hostile=distress_hostile,
+            )
+            cot_type = None
+            if cot_xml:
+                root = ET.fromstring(cot_xml)
+                cot_type = root.attrib.get("type")
+            results.append({
+                "output_id": output_id,
+                "output_name": o.get("name"),
+                "cot_type": cot_type,
+                "use_cotproxy": True,
+                "transform": transform,
+                "cot_xml": cot_xml,
+            })
+        except Exception as e:
+            results.append({
+                "output_id": output_id,
+                "output_name": o.get("name"),
+                "error": f"Failed to build CoT: {e}",
+            })
+
+    return jsonify({
+        "query": q,
+        "matches": len(matches),
+        "aircraft": aircraft,
+        "outputs": results,
+    })
+
+
+# ── VPN Status ───────────────────────────────────────────────────────────────
+
+@bp.route("/vpn/status")
+@admin_required
+def vpn_status():
+    """Combined VPN status (Tailscale + NetBird). Enriches NetBird peers with feeder software version by IP."""
+    from models import parse_mlat_client_name
+    data = get_combined_status()
+    nb = data.get("netbird") or {}
+    peers = nb.get("peers") or []
+    if peers:
+        netbird_feeders = FeederModel.get_all(conn_type_filter="netbird")
+        ip_to_version = {}
+        for f in netbird_feeders:
+            _, ver = parse_mlat_client_name(f.get("name") or "")
+            if f.get("ip_address") and ver:
+                ip_to_version[f["ip_address"]] = ver
+        for p in peers:
+            p["feeder_software_version"] = ip_to_version.get(p.get("ip") or "", "") or "—"
+    return jsonify(data)
+
+
+# ── NetBird Client (server enrollment) ───────────────────────────────────────
+
+@bp.route("/netbird/client")
+@admin_required
+def netbird_client():
+    """Get netbird-client container status."""
+    return jsonify(get_netbird_client_status())
+
+
+@bp.route("/netbird/enroll", methods=["POST"])
+@admin_required
+def netbird_enroll():
+    """Enroll this server as a NetBird peer using a setup key."""
+    data = request.get_json()
+    setup_key = (data or {}).get("setup_key", "").strip()
+    if not setup_key:
+        return jsonify({"error": "setup_key is required"}), 400
+
+    management_url = os.environ.get("NETBIRD_API_URL", "https://netbird.tak-solutions.com")
+    ok, msg = enroll_netbird(setup_key, management_url)
+    if ok:
+        # Persist the setup key to .env so it survives updates
+        _persist_env_var("NB_SETUP_KEY", setup_key)
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"success": False, "error": msg}), 500
+
+
+@bp.route("/netbird/disconnect", methods=["POST"])
+@admin_required
+def netbird_disconnect_route():
+    """Stop and remove the netbird-client container."""
+    ok, msg = disconnect_netbird()
+    if ok:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"success": False, "error": msg}), 500
+
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+
+@bp.route("/docker/containers")
+@admin_required
+def docker_containers():
+    """List all TAKNET containers."""
+    return jsonify({"containers": get_containers()})
+
+
+@bp.route("/docker/restart-all", methods=["POST"])
+@admin_required
+def docker_restart_all():
+    """Restart all TAKNET containers."""
+    containers = get_containers()
+    output_lines = []
+    errors = []
+    for c in containers:
+        ok, msg = restart_container(c["name"])
+        output_lines.append(f"{'✓' if ok else '✗'} {c['short_name']}: {msg}")
+        if not ok:
+            errors.append(c["short_name"])
+    output = "\n".join(output_lines)
+    if errors:
+        return jsonify({"success": False, "error": f"Failed: {', '.join(errors)}", "output": output})
+    return jsonify({"success": True, "output": output})
+
+
+@bp.route("/docker/containers/<name>/restart", methods=["POST"])
+@admin_required
+def docker_restart(n):
+    """Restart a container."""
+    if not n.startswith("taknet-"):
+        return jsonify({"error": "Invalid container"}), 400
+    ok, msg = restart_container(n)
+    return jsonify({"success": ok, "message": msg})
+
+
+@bp.route("/docker/containers/<n>/logs")
+@admin_required
+def docker_logs(n):
+    """Get container logs."""
+    if not n.startswith("taknet-"):
+        return jsonify({"error": "Invalid container"}), 400
+    tail = request.args.get("tail", 100, type=int)
+    logs = get_logs(n, tail=tail)
+    return jsonify({"logs": logs})
+
+
+# ── Activity ─────────────────────────────────────────────────────────────────
+
+@bp.route("/activity")
+@network_admin_required
+def activity():
+    """Recent activity log."""
+    limit = request.args.get("limit", 20, type=int)
+    events = ActivityModel.get_recent(limit=limit)
+    return jsonify({"activity": events})
+
+
+# ── System ───────────────────────────────────────────────────────────────────
+
+@bp.route("/system")
+@network_admin_required
+def system_info():
+    """System resource information."""
+    return jsonify(_get_system_info())
+
+
+# ── Updates ──────────────────────────────────────────────────────────────────
+
+@bp.route("/updates/check")
+@admin_required
+def updates_check():
+    """Check GitHub for latest version and return release notes for new versions."""
+    try:
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
+        # Avoid GitHub CDN cache so we see the real latest
+        resp = http_requests.get(url, timeout=10, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        if resp.status_code != 200:
+            return jsonify({"error": f"GitHub returned {resp.status_code}"}), 502
+
+        latest = resp.text.strip()
+        current = _get_current_version()
+        update_available = latest != current
+
+        # Fetch RELEASES.json from GitHub to get notes for unreleased versions
+        new_releases = []
+        if update_available:
+            try:
+                rurl = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/RELEASES.json"
+                rresp = http_requests.get(rurl, timeout=10, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+                if rresp.status_code == 200:
+                    all_releases = rresp.json()
+                    # Return entries that are newer than current (appear before current in list)
+                    for rel in all_releases:
+                        if rel.get("version") == current:
+                            break
+                        new_releases.append(rel)
+            except Exception:
+                pass
+
+        response = jsonify({
+            "current": current,
+            "latest": latest,
+            "update_available": update_available,
+            "new_releases": new_releases,
+        })
+        # Prevent browser from caching so "Check Now" and page load always get fresh comparison
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/updates/run", methods=["POST"])
+@admin_required
+def updates_run():
+    """Kick off the update process in a background thread."""
+    global _update_running
+    if _update_running:
+        return jsonify({"error": "Update already in progress"}), 409
+    _update_running = True
+    while not _update_queue.empty():
+        try:
+            _update_queue.get_nowait()
+        except Exception:
+            break
+    thread = threading.Thread(target=_run_update, daemon=True)
+    thread.start()
+    return jsonify({"success": True, "message": "Update started"})
+
+
+@bp.route("/updates/stream")
+@admin_required
+def updates_stream():
+    """SSE endpoint — streams update log lines to the browser."""
+    def generate():
+        while True:
+            try:
+                item = _update_queue.get(timeout=90)
+                yield f"data: {json.dumps(item)}\n\n"
+                # After pre_restart, pad with comments to force gunicorn to flush
+                # the chunk before the container restarts and kills the connection.
+                if item.get("type") == "pre_restart":
+                    for _ in range(8):
+                        yield ": keepalive\n\n"
+                if item.get("type") in ("done", "error"):
+                    break
+            except Exception:
+                yield "data: {\"type\": \"heartbeat\"}\n\n"
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers=headers)
+
+
+@bp.route("/updates/releases")
+@login_required_any
+def updates_releases():
+    """Return release notes from RELEASES.json."""
+    limit = request.args.get("limit", 6, type=int)
+    try:
+        for path in ["/app/RELEASES.json",
+                     os.path.join(INSTALL_DIR, "RELEASES.json"),
+                     os.path.join(os.path.dirname(os.path.dirname(__file__)), "RELEASES.json")]:
+            if os.path.exists(path):
+                with open(path) as f:
+                    releases = json.load(f)
+                return jsonify({"releases": releases[:limit]})
+        return jsonify({"releases": []})
+    except Exception as e:
+        return jsonify({"error": str(e), "releases": []}), 500
+
+
+@bp.route("/updates/history")
+@admin_required
+def updates_history():
+    """Return past update log."""
+    limit = request.args.get("limit", 6, type=int)
+    history = UpdateModel.get_history(limit)
+    return jsonify({"history": history})
+
+
+def _get_current_version():
+    """Read current VERSION file."""
+    try:
+        vpath = os.path.join(os.path.dirname(os.path.dirname(__file__)), "VERSION")
+        if os.path.exists(vpath):
+            return open(vpath).read().strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _env_value_escape(value):
+    """Escape a value for .env: wrap in single quotes if needed so $ and newlines don't break parsing."""
+    if not value:
+        return value
+    if "\n" in value or "\r" in value or "=" in value or "$" in value or " " in value or "#" in value or "'" in value:
+        # Single-quoted: only ' must be escaped as '"'"' for shell-style .env
+        escaped = value.replace("'", "'\"'\"'")
+        return f"'{escaped}'"
+    return value
+
+
+def _persist_env_var(key, value):
+    """Write or update a key=value line in the host .env file. Value is escaped for .env safety."""
+    env_path = os.path.join(INSTALL_DIR, ".env")
+    safe_value = _env_value_escape(value)
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+            found = False
+            for i, line in enumerate(lines):
+                if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                    lines[i] = f"{key}={safe_value}\n"
+                    found = True
+                    break
+            if not found:
+                lines.append(f"{key}={safe_value}\n")
+            with open(env_path, "w") as f:
+                f.writelines(lines)
+        else:
+            with open(env_path, "w") as f:
+                f.write(f"{key}={safe_value}\n")
+    except Exception as e:
+        print(f"[api] Failed to persist {key} to .env: {e}")
+
+
+def _read_env_bool(key, default=False):
+    """Read a key from the host .env and return True only if value is 'true' (case-insensitive)."""
+    env_path = os.path.join(INSTALL_DIR, ".env")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                        return val == "true"
+    except Exception:
+        pass
+    return default
+
+
+def _read_env_truthy(key, default=False):
+    """True when .env value is 1/true/yes/on (case-insensitive); false when unset or other."""
+    v = (_read_env_value(key, "") or "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on")
+
+
+def _read_env_value(key, default=""):
+    """Read a key from the host .env and return the raw value (stripping surrounding quotes)."""
+    env_path = os.path.join(INSTALL_DIR, ".env")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                        val = line.split("=", 1)[1].strip()
+                        if len(val) >= 2 and val.startswith("'") and val.endswith("'"):
+                            val = val[1:-1].replace("'\"'\"'", "'")
+                        elif len(val) >= 2 and val.startswith('"') and val.endswith('"'):
+                            val = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                        return val
+    except Exception:
+        pass
+    return default
+
+
+# ── ADSBHub settings (Config → Services) ──────────────────────────────────────
+
+@bp.route("/settings/adsbhub", methods=["GET"])
+@admin_required
+def get_adsbhub_settings():
+    """Return current ADSBHub feed/receive flags and client key from .env."""
+    return jsonify({
+        "feed_enabled": _read_env_bool("ADSBHUB_FEED_ENABLED", False),
+        "receive_enabled": _read_env_bool("ADSBHUB_RECEIVE_ENABLED", False),
+        "client_key": _read_env_value("ADSBHUB_CLIENT_KEY", ""),
+    })
+
+
+def _restart_adsbhub_containers_background():
+    """Run container restarts in background so the HTTP request can return immediately."""
+    for name in ("taknet-aisstream-connector", "taknet-vessel-merger", "taknet-adsbhub-feeder", "taknet-aircraft-merger"):
+        try:
+            restart_container(name)
+        except Exception as e:
+            print(f"[api] Background restart {name}: {e}")
+
+
+def _write_receive_enabled_to_volume(enabled):
+    """Write receive_enabled to shared volume so aircraft-merger drops ADSBHub data immediately when disabled."""
+    try:
+        path = os.path.join(ADSBHUB_STATUS_PATH, "receive_enabled")
+        with open(path, "w") as f:
+            f.write("true" if enabled else "false")
+    except Exception as e:
+        print(f"[api] Write receive_enabled: {e}")
+
+
+@bp.route("/settings/adsbhub", methods=["POST"])
+@admin_required
+def set_adsbhub_settings():
+    """Update ADSBHub flags and client key in .env; write receive_enabled to shared volume; restart adsbhub-feeder and aircraft-merger in background."""
+    data = request.get_json() or {}
+    feed = data.get("feed_enabled", False)
+    receive = data.get("receive_enabled", False)
+    client_key = (data.get("client_key") or "").strip()
+    _persist_env_var("ADSBHUB_FEED_ENABLED", "true" if feed else "false")
+    _persist_env_var("ADSBHUB_RECEIVE_ENABLED", "true" if receive else "false")
+    _persist_env_var("ADSBHUB_CLIENT_KEY", client_key)
+    _write_receive_enabled_to_volume(receive)
+    # Restart containers in background so we don't timeout (restarts can take 30+ s each)
+    thread = threading.Thread(target=_restart_adsbhub_containers_background, daemon=True)
+    thread.start()
+    return jsonify({
+        "success": True,
+        "message": "ADSBHub settings saved. Services are restarting in the background (refresh containers in a moment).",
+    })
+
+
+# ── Resend (transactional mail) settings (Config → Services) ──────────────
+
+@bp.route("/settings/mail", methods=["GET"])
+@admin_required
+def get_mail_settings():
+    """Return current mail settings from the mounted host .env file."""
+    enabled = _read_env_bool("RESEND_ENABLED", False)
+    api_key_present = bool((_read_env_value("RESEND_API_KEY", "") or "").strip())
+    recipients_raw = _read_env_value("RESEND_ADMIN_EMAILS", "")
+    pending_user_recipients = [p.strip() for p in (recipients_raw or "").split(",") if p.strip()]
+    return jsonify({
+        "enabled": enabled,
+        "api_key_present": api_key_present,
+        "pending_user_recipients": pending_user_recipients,
+        # Don't return the API key itself (avoid accidental logs/UI exposure).
+        "api_key": "",
+    })
+
+
+@bp.route("/settings/mail", methods=["POST"])
+@admin_required
+def set_mail_settings():
+    """Update Resend settings in .env.
+
+    - If `api_key` is empty/missing, the existing stored key is preserved.
+    - If enabling mail but there is no key, returns 400.
+    """
+    data = request.get_json() or {}
+    enabled = bool(data.get("enabled", False))
+    api_key = (data.get("api_key") or "").strip()
+    pending_user_recipients = data.get("pending_user_recipients", None)
+
+    existing_api_key = (_read_env_value("RESEND_API_KEY", "") or "").strip()
+    if api_key:
+        _persist_env_var("RESEND_API_KEY", api_key)
+        existing_api_key = api_key
+
+    if enabled and not existing_api_key:
+        return jsonify({"success": False, "error": "api_key is required when enabling mail"}), 400
+
+    if pending_user_recipients is not None:
+        # Accept either `["a@x", "b@y"]` or a comma-separated string.
+        if isinstance(pending_user_recipients, str):
+            parts = [p.strip() for p in pending_user_recipients.split(",")]
+        elif isinstance(pending_user_recipients, list):
+            parts = [str(p).strip() for p in pending_user_recipients]
+        else:
+            return jsonify({"success": False, "error": "pending_user_recipients must be an array or a comma-separated string"}), 400
+
+        normalized = [p for p in parts if p]
+        _persist_env_var("RESEND_ADMIN_EMAILS", ",".join(normalized))
+
+    _persist_env_var("RESEND_ENABLED", "true" if enabled else "false")
+    return jsonify({
+        "success": True,
+        "message": "Mail settings saved.",
+    })
+
+
+# ── CoT push (Config → Services): chunk size + XML template toggle ───────────
+
+def _restart_dashboard_background():
+    """Apply .env changes that affect the dashboard container environment."""
+    try:
+        restart_container("taknet-dashboard")
+    except Exception as e:
+        print(f"[api] Background restart taknet-dashboard: {e}")
+
+
+@bp.route("/settings/cot-push", methods=["GET"])
+@admin_required
+def get_cot_push_settings():
+    """COT_SEND_CHUNK_MESSAGES and COT_XML_USE_TEMPLATE from host .env plus effective runtime values."""
+    from cot_pipeline import _cot_send_chunk_message_count, _cot_xml_use_template
+
+    raw_chunk = (_read_env_value("COT_SEND_CHUNK_MESSAGES", "") or "").strip()
+    effective_chunk = _cot_send_chunk_message_count()
+    try:
+        parsed = int(raw_chunk) if raw_chunk else None
+    except ValueError:
+        parsed = None
+    if parsed is not None and 1 <= parsed <= 5000:
+        chunk_val = parsed
+    else:
+        chunk_val = effective_chunk
+    raw_tpl = (_read_env_value("COT_XML_USE_TEMPLATE", "") or "").strip()
+    return jsonify({
+        "chunk_messages": chunk_val,
+        "effective_chunk": effective_chunk,
+        "chunk_from_env_file": bool(raw_chunk),
+        "use_template": _read_env_truthy("COT_XML_USE_TEMPLATE", False),
+        "effective_template": _cot_xml_use_template(),
+        "template_from_env_file": bool(raw_tpl),
+    })
+
+
+@bp.route("/settings/cot-push", methods=["POST"])
+@admin_required
+def set_cot_push_settings():
+    """Persist CoT-related .env keys; restart dashboard once when anything changes."""
+    data = request.get_json() or {}
+    did = False
+    if "chunk_messages" in data and data.get("chunk_messages") is not None:
+        raw = data.get("chunk_messages", data.get("cot_send_chunk_messages"))
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "chunk_messages must be an integer between 1 and 5000"}), 400
+        n = max(1, min(5000, n))
+        _persist_env_var("COT_SEND_CHUNK_MESSAGES", str(n))
+        did = True
+    if "use_template" in data:
+        raw = data.get("use_template", data.get("cot_xml_use_template"))
+        if isinstance(raw, str):
+            use = raw.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            use = bool(raw)
+        _persist_env_var("COT_XML_USE_TEMPLATE", "true" if use else "false")
+        did = True
+    if not did:
+        return jsonify({"success": False, "error": "Provide chunk_messages and/or use_template"}), 400
+    thread = threading.Thread(target=_restart_dashboard_background, daemon=True)
+    thread.start()
+    return jsonify({
+        "success": True,
+        "message": "Saved. Dashboard is restarting to apply CoT settings.",
+    })
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _get_aircraft_count():
+    """Get current aircraft count from readsb."""
+    data = _get_aircraft_data()
+    return data.get("total", 0)
+
+
+def _get_aircraft_data():
+    """Fetch vessels.json (merged local + network feeds). Response key stays 'aircraft' for dashboard JS compatibility."""
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            vessels = data.get("vessels") or data.get("aircraft") or []
+            with_pos = [v for v in vessels if "lat" in v and "lon" in v]
+            remote_sources = ("aishub", "aisstream", "adsbhub", "network")
+
+            def _is_remote(v):
+                s = (v.get("source") or "").lower()
+                return any(x in s for x in remote_sources) or s in remote_sources
+
+            direct = sum(1 for v in vessels if not _is_remote(v))
+            network = sum(1 for v in vessels if _is_remote(v))
+            return {
+                "total": len(vessels),
+                "with_position": len(with_pos),
+                "direct": direct,
+                "network": network,
+                "messages": data.get("messages", 0),
+            }
+    except Exception:
+        pass
+
+    return {"total": 0, "with_position": 0, "direct": 0, "network": 0, "messages": 0}
+
+
+def _get_system_info():
+    """Get system resource usage."""
+    uptime_seconds = int(time.time() - psutil.boot_time())
+    app_uptime = int(time.time() - _start_time)
+
+    return {
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "memory": {
+            "total_gb": round(psutil.virtual_memory().total / (1024**3), 1),
+            "used_gb": round(psutil.virtual_memory().used / (1024**3), 1),
+            "percent": psutil.virtual_memory().percent,
+        },
+        "disk": {
+            "total_gb": round(psutil.disk_usage("/").total / (1024**3), 1),
+            "used_gb": round(psutil.disk_usage("/").used / (1024**3), 1),
+            "percent": psutil.disk_usage("/").percent,
+        },
+        "uptime_seconds": uptime_seconds,
+        "app_uptime_seconds": app_uptime,
+    }
+
+
+def _get_health_detail():
+    """Detailed health for System Health page. Uses host snapshot when available (full server view)."""
+    feeder_stats = FeederModel.get_stats()
+    host = get_host_snapshot()
+    if host:
+        base = _get_system_info()
+        base["cpu_percent"] = host.get("cpu", 0)
+        base["memory"] = {
+            "total_gb": host.get("memory_total_gb", 0),
+            "used_gb": host.get("memory_used_gb", 0),
+            "percent": host.get("memory", 0),
+        }
+        base["disk"] = {
+            "total_gb": host.get("disk_total_gb", 0),
+            "used_gb": host.get("disk_used_gb", 0),
+            "percent": host.get("disk", 0),
+        }
+        base["cpu_per_core"] = []
+        base["memory_breakdown"] = {}
+        base["disk_partitions"] = []
+        procs = host.get("top_processes") or []
+        base["processes"] = [
+            {
+                "pid": p.get("pid"),
+                "username": p.get("username", "—"),
+                "cpu_percent": p.get("cpu_percent", 0),
+                "memory_percent": p.get("memory_percent", 0),
+                "rss_mb": p.get("rss_mb", 0),
+                "status": (p.get("status") or "—")[:12],
+                "cmdline": (p.get("cmd") or "?")[:80],
+            }
+            for p in procs[:50]
+        ]
+        base["from_host"] = True
+        base["feeder_total"] = feeder_stats.get("total", 0)
+        base["feeder_active"] = feeder_stats.get("active", 0)
+        base["feeder_breakdown"] = feeder_stats.get("breakdown") or []
+        return base
+
+    vm = psutil.virtual_memory()
+    try:
+        cpu_per_core = psutil.cpu_percent(interval=0.15, percpu=True)
+    except Exception:
+        cpu_per_core = []
+    memory_breakdown = {
+        "total_gb": round(vm.total / (1024**3), 2),
+        "used_gb": round(vm.used / (1024**3), 2),
+        "available_gb": round(vm.available / (1024**3), 2),
+        "percent": vm.percent,
+        "cached_gb": round((getattr(vm, "cached", 0) or 0) / (1024**3), 2),
+        "buffers_gb": round((getattr(vm, "buffers", 0) or 0) / (1024**3), 2),
+    }
+    disk_partitions = []
+    for p in psutil.disk_partitions(all=False):
+        try:
+            usage = psutil.disk_usage(p.mountpoint)
+            disk_partitions.append({
+                "mount": p.mountpoint,
+                "device": p.device,
+                "total_gb": round(usage.total / (1024**3), 1),
+                "used_gb": round(usage.used / (1024**3), 1),
+                "free_gb": round(usage.free / (1024**3), 1),
+                "percent": usage.percent,
+            })
+        except (PermissionError, OSError):
+            continue
+    processes = []
+    try:
+        for proc in psutil.process_iter(attrs=["pid", "username", "cpu_percent", "memory_percent", "memory_info", "status", "cmdline"], ad_value=None):
+            try:
+                info = proc.info
+                if info.get("pid") is None:
+                    continue
+                cmd = info.get("cmdline") or []
+                cmd_str = " ".join(cmd)[:80] if cmd else (proc.name() if hasattr(proc, "name") else "")
+                rss_mb = 0
+                if info.get("memory_info"):
+                    rss_mb = round(info["memory_info"].rss / (1024 * 1024), 1)
+                processes.append({
+                    "pid": info["pid"],
+                    "username": info.get("username") or "?",
+                    "cpu_percent": round(info.get("cpu_percent") or 0, 1),
+                    "memory_percent": round(info.get("memory_percent") or 0, 1),
+                    "rss_mb": rss_mb,
+                    "status": (info.get("status") or "?")[:12],
+                    "cmdline": (cmd_str or "?")[:80],
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    processes.sort(key=lambda x: (x["cpu_percent"], x["memory_percent"]), reverse=True)
+    processes = processes[:50]
+    base = _get_system_info()
+    base["cpu_per_core"] = cpu_per_core
+    base["memory_breakdown"] = memory_breakdown
+    base["disk_partitions"] = disk_partitions
+    base["processes"] = processes
+    base["from_host"] = False
+    base["feeder_total"] = feeder_stats.get("total", 0)
+    base["feeder_active"] = feeder_stats.get("active", 0)
+    base["feeder_breakdown"] = feeder_stats.get("breakdown") or []
+    return base
+
+
+@bp.route("/health/detail")
+@admin_required
+def health_detail():
+    """Detailed system health for the System Health page (admin only)."""
+    return jsonify(_get_health_detail())
+
+
+@bp.route("/health/history")
+@admin_required
+def health_history():
+    """CPU/memory/disk history with top processes per sample (admin only). For correlating spikes with processes."""
+    minutes = request.args.get("minutes", 60, type=int)
+    minutes = min(max(minutes, 5), 120)
+    points = get_health_history(minutes=minutes)
+    return jsonify({"points": points})
+
+
+def _cot_phase_timing_env_active():
+    v = (os.environ.get("COT_PHASE_TIMING") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _parse_bool_setting(val):
+    if val is None:
+        return False
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+@bp.route("/health/cot-timing", methods=["GET", "POST"])
+@admin_required
+def health_cot_timing():
+    """CoT phase timing toggle and line buffer for System Health page (admin only)."""
+    from cot_pipeline import clear_cot_phase_timing_lines, get_cot_phase_timing_lines_snapshot
+
+    if request.method == "GET":
+        ui_on = _parse_bool_setting(get_setting(SETTINGS_KEY_COT_PHASE_TIMING_UI))
+        return jsonify(
+            {
+                "enabled": ui_on,
+                "env_forces": _cot_phase_timing_env_active(),
+                "lines": get_cot_phase_timing_lines_snapshot(),
+            }
+        )
+
+    data = request.get_json(silent=True) or {}
+    want = data.get("enabled")
+    if not isinstance(want, bool):
+        return jsonify({"error": "JSON body must include enabled: true or false"}), 400
+    set_setting(SETTINGS_KEY_COT_PHASE_TIMING_UI, "1" if want else "0")
+    if not want:
+        clear_cot_phase_timing_lines()
+    return jsonify(
+        {
+            "ok": True,
+            "enabled": want,
+            "env_forces": _cot_phase_timing_env_active(),
+            "lines": get_cot_phase_timing_lines_snapshot(),
+        }
+    )
+
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+
+@bp.route("/outputs")
+@login_required_any
+def outputs_list():
+    from flask_login import current_user
+    from models import OutputKeyModel
+    items = OutputModel.get_for_user(current_user.id, current_user.role)
+    for item in items:
+        if item.get("mode") == "api":
+            item["key_meta"] = OutputKeyModel.get_for_output(item["id"])
+    return jsonify({"outputs": items})
+
+
+@bp.route("/outputs/<int:output_id>")
+@network_admin_required
+def output_get(output_id):
+    from flask_login import current_user
+    item = OutputModel.get_by_id(output_id, current_user.id, current_user.role)
+    if item is None:
+        return jsonify({"error": "Not found or access denied"}), 404
+    from models import OutputKeyModel
+    item["key_meta"] = OutputKeyModel.get_for_output(output_id)
+    return jsonify({"output": item})
+
+
+@bp.route("/outputs", methods=["POST"])
+@network_admin_required
+def output_create():
+    from flask_login import current_user
+    from models import OutputKeyModel
+    data = request.get_json(silent=True) or {}
+    name        = (data.get("name") or "").strip()
+    output_type = (data.get("output_type") or "").strip()
+    mode        = data.get("mode", "api")
+    key_type    = data.get("key_type", "single_use")
+    if not name or not output_type:
+        return jsonify({"error": "name and output_type are required"}), 400
+    if output_type not in ("json", "beast_raw", "cot", "adsb_direct"):
+        return jsonify({"error": "output_type must be 'json', 'beast_raw', 'cot', or 'adsb_direct'"}), 400
+    if mode not in ("api", "push"):
+        return jsonify({"error": "mode must be 'api' or 'push'"}), 400
+    if output_type == "adsb_direct" and mode != "api":
+        return jsonify({"error": "adsb_direct output_type supports API mode only"}), 400
+    if output_type == "adsb_direct":
+        # ADSB Direct is always durable so plugin endpoints remain stable.
+        key_type = "durable"
+    if key_type not in ("single_use", "durable"):
+        return jsonify({"error": "key_type must be 'single_use' or 'durable'"}), 400
+    output_format = (data.get("output_format") or ("cot" if output_type == "cot" else "as_is")).strip()
+    if output_format not in ("as_is", "cot"):
+        output_format = "cot" if output_type == "cot" else "as_is"
+    # CoT outputs always use COTProxy transforms (even if older records had this disabled).
+    use_cotproxy = True if output_type == "cot" else False
+    import json as _json
+    config = _json.dumps(data.get("config") or {})
+    output_id = OutputModel.create(
+        name=name,
+        output_type=output_type,
+        mode=mode,
+        config=config,
+        created_by=int(current_user.id),
+        notes=data.get("notes"),
+        output_format=output_format,
+        use_cotproxy=use_cotproxy,
+    )
+    raw_key = None
+    if mode == "api":
+        raw_key = OutputKeyModel.generate(output_id, key_type=key_type)
+    return jsonify({"success": True, "id": output_id, "api_key": raw_key}), 201
+
+
+@bp.route("/outputs/<int:output_id>", methods=["PUT"])
+@network_admin_required
+def output_update(output_id):
+    from flask_login import current_user
+    import json as _json
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    data = request.get_json(silent=True) or {}
+    existing = OutputModel.get_by_id(output_id, current_user.id, current_user.role) or {}
+    target_type = (data.get("output_type") or existing.get("output_type") or "").strip()
+    target_mode = (data.get("mode") or existing.get("mode") or "").strip()
+    if target_type == "adsb_direct" and target_mode != "api":
+        return jsonify({"error": "adsb_direct output_type supports API mode only"}), 400
+
+    # CoT outputs always use COTProxy transforms (selector removed from UI; also fixes older records).
+    data["use_cotproxy"] = 1 if target_type == "cot" else 0
+    if target_type == "cot":
+        data["output_format"] = "cot"
+    if "config" in data and isinstance(data["config"], dict):
+        new_c = dict(data["config"])
+        try:
+            old_raw = existing.get("config") or "{}"
+            old_c = _json.loads(old_raw) if isinstance(old_raw, str) else (old_raw if isinstance(old_raw, dict) else {})
+        except (TypeError, ValueError):
+            old_c = {}
+        if not isinstance(old_c, dict):
+            old_c = {}
+        if target_type == "cot" and target_mode == "push":
+            if str(new_c.get("cot_url") or "").strip() != str(old_c.get("cot_url") or "").strip():
+                new_c["cot_tls_paused"] = False
+        data["config"] = _json.dumps(new_c)
+    OutputModel.update(output_id, data)
+    return jsonify({"success": True})
+
+
+@bp.route("/outputs/<int:output_id>", methods=["DELETE"])
+@network_admin_required
+def output_delete(output_id):
+    from flask_login import current_user
+    from models import signal_drop_output
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    signal_drop_output(output_id)  # drop any active beast connection first
+    OutputModel.delete(output_id)
+    return jsonify({"success": True})
+
+
+@bp.route("/outputs/<int:output_id>/regenerate-key", methods=["POST"])
+@network_admin_required
+def output_regenerate_key(output_id):
+    from flask_login import current_user
+    from models import OutputKeyModel, signal_drop_output
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    item = OutputModel.get_by_id(output_id, current_user.id, current_user.role)
+    if not item:
+        return jsonify({"error": "Not found"}), 404
+    if item.get("mode") != "api":
+        return jsonify({"error": "Output is not in API mode"}), 400
+    # Signal beast-proxy to drop any active connection using the old key
+    signal_drop_output(output_id)
+    # Preserve existing key_type when regenerating
+    existing_key = OutputKeyModel.get_for_output(output_id)
+    key_type = "durable" if item.get("output_type") == "adsb_direct" else (existing_key or {}).get("key_type", "single_use")
+    raw_key = OutputKeyModel.generate(output_id, key_type=key_type)
+    return jsonify({"success": True, "api_key": raw_key})
+
+
+# ── COTProxy-style transforms (per output) ───────────────────────────────────
+
+@bp.route("/ps-air-icons")
+@network_admin_required
+def ps_air_icons_list():
+    """Return list of PS Air Icons (Public Safety Air v8) for COTProxy icon picker/reference."""
+    try:
+        from ps_air_icons import get_ps_air_icons_list
+        icons = get_ps_air_icons_list()
+        return jsonify({"icons": icons, "iconset_uid": "66f14976-4b62-4023-8edb-d8d2ebeaa336"})
+    except Exception as e:
+        return jsonify({"icons": [], "error": str(e)})
+
+
+@bp.route("/nato-icons")
+@network_admin_required
+def nato_icons_list():
+    """Return list of NATO Friend Air icons for COTProxy icon picker/reference."""
+    try:
+        from nato_icons import get_nato_icons_list
+        icons = get_nato_icons_list()
+        return jsonify({"icons": icons})
+    except Exception as e:
+        return jsonify({"icons": [], "error": str(e)})
+
+
+def _cot_filter_arg(name: str) -> str | None:
+    v = request.args.get("filter_" + name)
+    return (v.strip() if v and isinstance(v, str) else None) or None
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms")
+@network_admin_required
+def cot_transforms_list(output_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    page = request.args.get("page", "1")
+    per_page = request.args.get("per_page", "100")
+    sort = request.args.get("sort", "hex")
+    order = request.args.get("order", "asc")
+    try:
+        p, pp = max(1, int(page)), max(1, min(500, int(per_page)))
+    except (TypeError, ValueError):
+        p, pp = 1, 100
+    items, total = CotTransformModel.get_paginated(
+        output_id,
+        page=p,
+        per_page=pp,
+        sort_by=sort,
+        order=order,
+        filter_hex=_cot_filter_arg("hex"),
+        filter_callsign=_cot_filter_arg("callsign"),
+        filter_type=_cot_filter_arg("type"),
+        filter_domain=_cot_filter_arg("domain"),
+        filter_agency=_cot_filter_arg("agency"),
+        filter_reg=_cot_filter_arg("reg"),
+        filter_model=_cot_filter_arg("model"),
+        filter_cot=request.args.get("filter_cot"),  # allow empty string for "Default"
+    )
+    total_pages = max(1, (total + pp - 1) // pp) if total else 1
+    return jsonify({
+        "transforms": items,
+        "total": total,
+        "page": p,
+        "per_page": pp,
+        "total_pages": total_pages,
+    })
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/facets")
+@network_admin_required
+def cot_transforms_facets(output_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    facets = CotTransformModel.get_facets(output_id)
+    return jsonify(facets)
+
+
+@bp.route("/outputs/cot-transforms/template")
+@network_admin_required
+def cot_transforms_template():
+    """Download blank CSV template for bulk import (DOMAIN,AGENCY,REG,CALLSIGN,TYPE,MODEL,HEX,COT,ICON)."""
+    import io
+    from flask import send_file
+    buf = io.BytesIO()
+    buf.write(b"\xef\xbb\xbf")  # UTF-8 BOM for Excel
+    buf.write(",".join(CotTransformModel.CSV_HEADERS).encode("utf-8") + b"\n")
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="cot_transforms_template.csv",
+    )
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms", methods=["POST"])
+@network_admin_required
+def cot_transform_create(output_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        tid = CotTransformModel.create(output_id, data)
+        return jsonify({"success": True, "id": tid}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/<int:transform_id>", methods=["GET"])
+@network_admin_required
+def cot_transform_get(output_id, transform_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    t = CotTransformModel.get_by_id(transform_id, output_id)
+    if not t:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"transform": t})
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/<int:transform_id>", methods=["PUT"])
+@network_admin_required
+def cot_transform_update(output_id, transform_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    data = request.get_json(silent=True) or {}
+    if CotTransformModel.get_by_id(transform_id, output_id) is None:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        ok = CotTransformModel.update(transform_id, output_id, data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not ok:
+        return jsonify({"error": "No updatable fields (or update rejected)"}), 400
+    return jsonify({"success": True})
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/<int:transform_id>", methods=["DELETE"])
+@network_admin_required
+def cot_transform_delete(output_id, transform_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    CotTransformModel.delete(transform_id, output_id)
+    return jsonify({"success": True})
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/bulk-delete", methods=["POST"])
+@network_admin_required
+def cot_transforms_bulk_delete(output_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    data = request.get_json(silent=True) or {}
+    delete_all = data.get("delete_all") is True
+    ids = data.get("ids") if not delete_all else []
+    if not delete_all and (not ids or not isinstance(ids, list)):
+        return jsonify({"error": "ids array or delete_all: true required"}), 400
+    deleted = CotTransformModel.bulk_delete(output_id, ids, delete_all=delete_all)
+    return jsonify({"success": True, "deleted": deleted})
+
+
+# ── CoT push TLS certificates (owner-only; never return cert content) ─────────
+
+def _cot_cert_owner_only(output_id):
+    """Ensure current user is the output creator. Certs are never visible to admins or other users."""
+    from flask_login import current_user
+    output = OutputModel.get_by_id(output_id, int(current_user.id), current_user.role)
+    if not output:
+        return None, 404
+    if output.get("output_type") != "cot":
+        return None, 404
+    if int(output["created_by"]) != int(current_user.id):
+        return None, 403
+    return output, None
+
+
+@bp.route("/outputs/<int:output_id>/cot-certs/status")
+@network_admin_required
+def cot_certs_status(output_id):
+    """Return only { has_cert: bool }. Only the output creator can call this."""
+    from flask_login import current_user
+    output, err = _cot_cert_owner_only(output_id)
+    if err:
+        return jsonify({"error": "Not found or access denied"}), err
+    return jsonify({"has_cert": OutputCotCertModel.has_cert(output_id)})
+
+
+@bp.route("/outputs/<int:output_id>/cot-certs", methods=["POST"])
+@network_admin_required
+def cot_certs_upload(output_id):
+    """Upload client cert + key (and optional CA) for CoT push TLS, or a single .p12/.pfx file. Owner only. Stored encrypted; never returned."""
+    from flask_login import current_user
+    from cert_crypto import load_pkcs12_to_pem
+    output, err = _cot_cert_owner_only(output_id)
+    if err:
+        return jsonify({"error": "Not found or access denied"}), err
+    cert_pem = key_pem = ca_pem = None
+    if request.content_type and "multipart/form-data" in request.content_type:
+        p12_file = request.files.get("p12")
+        p12_password = request.form.get("p12_password") or ""
+        cert_file = request.files.get("cert")
+        key_file = request.files.get("key")
+        ca_file = request.files.get("ca")
+        has_p12 = p12_file and p12_file.filename and (p12_file.filename.lower().endswith(".p12") or p12_file.filename.lower().endswith(".pfx"))
+        has_cert = cert_file and cert_file.filename
+        has_key = key_file and key_file.filename
+        if has_p12 and (has_cert or has_key):
+            return jsonify({"error": "Use one option only: upload either cert + key (two files) or a single .p12 file, not both"}), 400
+        if has_p12:
+            try:
+                pwd = (p12_password or "").strip() or None  # None = no password
+                cert_pem, key_pem = load_pkcs12_to_pem(p12_file.read(), pwd)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+        else:
+            if has_cert:
+                cert_pem = cert_file.read().decode("utf-8", errors="replace")
+            if has_key:
+                key_pem = key_file.read().decode("utf-8", errors="replace")
+            if ca_file and ca_file.filename:
+                ca_pem = ca_file.read().decode("utf-8", errors="replace")
+    if not cert_pem or not cert_pem.strip():
+        return jsonify({"error": "Use one option only: upload certificate and key (two files) or a single .p12/.pfx file"}), 400
+    if not key_pem or not key_pem.strip():
+        return jsonify({"error": "Use one option only: upload certificate and key (two files) or a single .p12/.pfx file"}), 400
+    try:
+        OutputCotCertModel.set(output_id, cert_pem.strip(), key_pem.strip(), (ca_pem or "").strip() or None)
+        from cot_pipeline import drop_cot_persistent_socket
+
+        OutputModel.merge_config(output_id, {"cot_tls_paused": False})
+        drop_cot_persistent_socket(output_id)
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/outputs/<int:output_id>/cot-test-tls", methods=["POST"])
+@network_admin_required
+def cot_test_tls(output_id):
+    """Try TCP+TLS handshake to the CoT server; on success clear cot_tls_paused. Optional JSON { cot_url } for unsaved form."""
+    from flask_login import current_user
+    from cot_pipeline import drop_cot_persistent_socket, test_cot_tls_handshake
+
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    item = OutputModel.get_by_id(output_id, current_user.id, current_user.role)
+    if not item or item.get("output_type") != "cot" or item.get("mode") != "push":
+        return jsonify({"error": "Not a CoT push output"}), 400
+    body = request.get_json(silent=True) or {}
+    override = (body.get("cot_url") or "").strip() or None
+    ok, msg = test_cot_tls_handshake(output_id, override)
+    if ok:
+        patches = {"cot_tls_paused": False}
+        if override:
+            patches["cot_url"] = override.strip()
+        OutputModel.merge_config(output_id, patches)
+        drop_cot_persistent_socket(output_id)
+        return jsonify({"ok": True, "message": msg, "cot_url_saved": bool(override)})
+    return jsonify({"ok": False, "error": msg}), 400
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/import", methods=["POST"])
+@network_admin_required
+def cot_transforms_import(output_id):
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    csv_text = None
+    if request.content_type and "multipart/form-data" in request.content_type and "file" in request.files:
+        f = request.files.get("file")
+        if f and f.filename:
+            csv_text = f.read().decode("utf-8", errors="replace")
+    if csv_text is None:
+        data = request.get_json(silent=True) or {}
+        csv_text = data.get("csv") or request.get_data(as_text=True)
+    if not csv_text or not csv_text.strip():
+        return jsonify({"error": "No CSV data (send file or JSON { csv: \"...\" } or raw body)"}), 400
+    # Single transaction in import_from_csv to avoid 504 on large CSVs; if behind nginx, consider proxy_read_timeout.
+    inserted, errors = CotTransformModel.import_from_csv(output_id, csv_text)
+    return jsonify({"success": True, "inserted": inserted, "errors": errors})
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/duplicates/scan", methods=["GET"])
+@network_admin_required
+def cot_transforms_duplicates_scan(output_id):
+    """Scan for duplicate cot_transforms groups by HEX (case-insensitive)."""
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    return jsonify(CotTransformModel.find_duplicates(output_id))
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/duplicates/automerge", methods=["POST"])
+@network_admin_required
+def cot_transforms_duplicates_automerge(output_id):
+    """Auto-merge exact duplicate transform rows (same values across all fields)."""
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    try:
+        return jsonify(CotTransformModel.automerge_exact_duplicates(output_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.route("/outputs/<int:output_id>/cot-transforms/duplicates/merge", methods=["POST"])
+@network_admin_required
+def cot_transforms_duplicates_merge(output_id):
+    """Merge mismatched duplicates using field overrides per HEX group."""
+    from flask_login import current_user
+    if not OutputModel.can_modify(output_id, current_user.id, current_user.role):
+        return jsonify({"error": "Access denied"}), 403
+    data = request.get_json(silent=True) or {}
+    merges = data.get("groups") or []
+    try:
+        res = CotTransformModel.merge_duplicate_groups(output_id, merges)
+        return jsonify({"success": True, **res})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _extract_output_key():
+    """Get API key from ?key=, X-API-Key:, or Authorization: Bearer (for Range API)."""
+    k = request.args.get("key", "").strip()
+    if k:
+        return k
+    k = request.headers.get("X-API-Key", "").strip()
+    if k:
+        return k
+    auth = request.headers.get("Authorization", "")
+    if auth and auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _haversine_nm(lat1, lon1, lat2, lon2):
+    """Great-circle distance in nautical miles."""
+    R = 3440.065
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _as_int_or_none(v):
+    try:
+        if v is None or str(v).strip() == "":
+            return None
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _aircraft_altitude_ft(a: dict):
+    """Best-effort altitude in feet from aircraft object."""
+    for k in ("alt_baro", "alt_geom", "altitude", "alt"):
+        val = a.get(k)
+        if val is None:
+            continue
+        if isinstance(val, (int, float)):
+            return int(val)
+        s = str(val).strip().lower()
+        if s in ("", "none", "nan"):
+            continue
+        if s == "ground":
+            return 0
+        try:
+            return int(float(s))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+# dbFlags bit constants (airplanes.live-style filters)
+FLAG_MIL = 1
+FLAG_INTERESTING = 2
+FLAG_PIA = 4
+FLAG_LADD = 8
+
+
+def _output_v2_envelope(aircraft, now_ts, ptime_ms):
+    return {
+        "msg": "No error",
+        "now": now_ts,
+        "total": len(aircraft),
+        "ctime": now_ts,
+        "ptime": round(float(ptime_ms or 0), 2),
+        "aircraft": aircraft,
+    }
+
+
+def _output_v2_error(msg, code=400):
+    return jsonify({
+        "msg": msg,
+        "now": time.time(),
+        "total": 0,
+        "ctime": 0,
+        "ptime": 0,
+        "aircraft": [],
+    }), code
+
+
+def _coerce_json_output_for_v2(raw_key: str):
+    """Validate key for JSON output and return (output, config) tuple."""
+    from models import OutputKeyModel
+    output = OutputKeyModel.validate(raw_key)
+    if not output:
+        return None, None, _output_v2_error("Invalid or inactive API key", 401)
+    if output.get("output_type") != "json":
+        return None, None, _output_v2_error("This key is not for JSON output", 400)
+    raw_config = output.get("config")
+    if isinstance(raw_config, dict):
+        cfg = raw_config
+    else:
+        try:
+            cfg = json.loads(str(raw_config or "{}"))
+        except (TypeError, ValueError):
+            cfg = {}
+    return output, cfg, None
+
+
+def _filter_aircraft_for_json_output(ac_list, config: dict):
+    """Apply JSON output filters configured in Outputs UI."""
+    # Include network ADSB toggle
+    v = config.get("include_network_adsb", True)
+    include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
+    if not include_network:
+        ac_list = [a for a in ac_list if (a.get("source") or "").lower() != "adsbhub"]
+
+    # Optional range-limits filter (center/radius configured on the output itself)
+    if config.get("range_limit_enabled"):
+        try:
+            c_lat = float(config.get("range_limit_lat"))
+            c_lon = float(config.get("range_limit_lon"))
+            c_nm = min(max(0.0, float(config.get("range_limit_nm"))), 250.0)
+        except (TypeError, ValueError):
+            c_lat = c_lon = c_nm = None
+        if c_lat is not None and c_lon is not None and c_nm is not None:
+            tmp = []
+            for a in ac_list:
+                a_lat, a_lon = a.get("lat"), a.get("lon")
+                if a_lat is None or a_lon is None:
+                    continue
+                if _haversine_nm(c_lat, c_lon, a_lat, a_lon) <= c_nm:
+                    tmp.append(a)
+            ac_list = tmp
+
+    # Optional elevation filter
+    if config.get("elevation_filter_enabled"):
+        no_min = bool(config.get("elevation_no_min"))
+        no_max = bool(config.get("elevation_no_max"))
+        min_ft = None if no_min else _as_int_or_none(config.get("elevation_min_ft"))
+        max_ft = None if no_max else _as_int_or_none(config.get("elevation_max_ft"))
+        if min_ft is not None:
+            min_ft = max(0, min(40000, min_ft))
+        if max_ft is not None:
+            max_ft = max(0, min(40000, max_ft))
+        if min_ft is not None and max_ft is not None and min_ft > max_ft:
+            min_ft, max_ft = max_ft, min_ft
+        if min_ft is not None or max_ft is not None:
+            tmp = []
+            for a in ac_list:
+                alt = _aircraft_altitude_ft(a)
+                if alt is None:
+                    continue
+                if min_ft is not None and alt < min_ft:
+                    continue
+                if max_ft is not None and alt > max_ft:
+                    continue
+                tmp.append(a)
+            ac_list = tmp
+
+    return ac_list
+
+
+@bp.route("/outputs/range/point/<string:lat>/<string:lon>/<string:radius_nm>")
+def output_range_point(lat, lon, radius_nm):
+    """Range API: aircraft within radius_nm of (lat, lon). Key required; respects Include Network ADSB.
+    String path segments so negative longitude (e.g. -85.18) matches; parsed to float inside."""
+    from models import OutputKeyModel
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        radius_nm = float(radius_nm)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid lat, lon, or radius_nm", "aircraft": []}), 400
+    raw_key = _extract_output_key()
+    output = OutputKeyModel.validate(raw_key)
+    if not output:
+        return jsonify({"error": "Invalid or inactive API key", "aircraft": []}), 401
+    if output.get("output_type") != "json":
+        return jsonify({"error": "This key is not for JSON API", "aircraft": []}), 400
+    raw_config = output.get("config")
+    if isinstance(raw_config, dict):
+        _config = raw_config
+    else:
+        try:
+            _config = json.loads(str(raw_config or "{}"))
+        except (TypeError, ValueError):
+            _config = {}
+    if not _config.get("range_api"):
+        return jsonify({"error": "This key is for JSON Stream, not Range API", "aircraft": []}), 400
+    radius_nm = min(max(0, radius_nm), 250.0)
+    config = _config
+    v = config.get("include_network_adsb", True)
+    include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if resp.status_code != 200:
+            return jsonify({"error": "Upstream data unavailable", "aircraft": []}), 503
+        data = resp.json()
+        aircraft = data.get("aircraft", [])
+        if not include_network:
+            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+        matched = []
+        for a in aircraft:
+            a_lat, a_lon = a.get("lat"), a.get("lon")
+            if a_lat is None or a_lon is None:
+                continue
+            dist = _haversine_nm(lat, lon, a_lat, a_lon)
+            if dist <= radius_nm:
+                matched.append({**a, "_distance_nm": round(dist, 2)})
+        matched.sort(key=lambda x: x.get("_distance_nm", 9999))
+        now_ts = data.get("now", time.time())
+        return jsonify({
+            "msg": "No error",
+            "now": now_ts,
+            "total": len(matched),
+            "ctime": now_ts,
+            "ptime": 0,
+            "aircraft": matched,
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "aircraft": []}), 503
+
+
+@bp.route("/outputs/range")
+def output_range_query():
+    """Range API via query params: ?lat=...&lon=...&radius_nm=...&key=... (alternative when path 404s)."""
+    lat_s = request.args.get("lat", "").strip()
+    lon_s = request.args.get("lon", "").strip()
+    radius_s = request.args.get("radius_nm", "").strip()
+    if not lat_s or not lon_s or not radius_s:
+        return jsonify({"error": "Missing lat, lon, or radius_nm query parameter", "aircraft": []}), 400
+    try:
+        lat = float(lat_s)
+        lon = float(lon_s)
+        radius_nm = min(max(0, float(radius_s)), 250.0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid lat, lon, or radius_nm", "aircraft": []}), 400
+    raw_key = _extract_output_key()
+    from models import OutputKeyModel
+    output = OutputKeyModel.validate(raw_key)
+    if not output:
+        return jsonify({"error": "Invalid or inactive API key", "aircraft": []}), 401
+    if output.get("output_type") != "json":
+        return jsonify({"error": "This key is not for JSON API", "aircraft": []}), 400
+    raw_config = output.get("config")
+    if isinstance(raw_config, dict):
+        _config = raw_config
+    else:
+        try:
+            _config = json.loads(str(raw_config or "{}"))
+        except (TypeError, ValueError):
+            _config = {}
+    if not _config.get("range_api"):
+        return jsonify({"error": "This key is for JSON Stream, not Range API", "aircraft": []}), 400
+    v = _config.get("include_network_adsb", True)
+    include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if resp.status_code != 200:
+            return jsonify({"error": "Upstream data unavailable", "aircraft": []}), 503
+        data = resp.json()
+        aircraft = data.get("aircraft", [])
+        if not include_network:
+            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+        matched = []
+        for a in aircraft:
+            a_lat, a_lon = a.get("lat"), a.get("lon")
+            if a_lat is None or a_lon is None:
+                continue
+            dist = _haversine_nm(lat, lon, a_lat, a_lon)
+            if dist <= radius_nm:
+                matched.append({**a, "_distance_nm": round(dist, 2)})
+        matched.sort(key=lambda x: x.get("_distance_nm", 9999))
+        now_ts = data.get("now", time.time())
+        return jsonify({
+            "msg": "No error",
+            "now": now_ts,
+            "total": len(matched),
+            "ctime": now_ts,
+            "ptime": 0,
+            "aircraft": matched,
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "aircraft": []}), 503
+
+
+@bp.route("/outputs/direct/<string:raw_key>/point/<string:lat>/<string:lon>/<string:radius_nm>")
+def output_adsb_direct_point(raw_key, lat, lon, radius_nm):
+    """ADSB Direct API: key in URL path; range by point/radius plus output-level filters.
+
+    Output-level filters:
+    - include_network_adsb (bool)
+    - direct_alt_min_ft / direct_alt_max_ft (optional ints)
+    """
+    from models import OutputKeyModel
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        radius_nm = min(max(0, float(radius_nm)), 250.0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid lat, lon, or radius_nm", "aircraft": []}), 400
+
+    output = OutputKeyModel.validate(raw_key)
+    if not output:
+        return jsonify({"error": "Invalid or inactive API key", "aircraft": []}), 401
+    if output.get("output_type") != "adsb_direct":
+        return jsonify({"error": "This key is not for ADSB Direct", "aircraft": []}), 400
+
+    raw_config = output.get("config")
+    if isinstance(raw_config, dict):
+        config = raw_config
+    else:
+        try:
+            config = json.loads(str(raw_config or "{}"))
+        except (TypeError, ValueError):
+            config = {}
+
+    v = config.get("include_network_adsb", True)
+    include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
+    min_alt = _as_int_or_none(config.get("direct_alt_min_ft"))
+    max_alt = _as_int_or_none(config.get("direct_alt_max_ft"))
+    if min_alt is not None:
+        min_alt = max(0, min(40000, min_alt))
+    if max_alt is not None:
+        max_alt = max(0, min(40000, max_alt))
+    if min_alt is not None and max_alt is not None and min_alt > max_alt:
+        return jsonify({"error": "Invalid ADSB Direct config: min altitude exceeds max altitude", "aircraft": []}), 400
+
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if resp.status_code != 200:
+            return jsonify({"error": "Upstream data unavailable", "aircraft": []}), 503
+        data = resp.json()
+        aircraft = data.get("aircraft", [])
+        if not include_network:
+            aircraft = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+
+        matched = []
+        for a in aircraft:
+            a_lat, a_lon = a.get("lat"), a.get("lon")
+            if a_lat is None or a_lon is None:
+                continue
+            dist = _haversine_nm(lat, lon, a_lat, a_lon)
+            if dist > radius_nm:
+                continue
+
+            if min_alt is not None or max_alt is not None:
+                alt = _aircraft_altitude_ft(a)
+                if alt is None:
+                    continue
+                if min_alt is not None and alt < min_alt:
+                    continue
+                if max_alt is not None and alt > max_alt:
+                    continue
+
+            matched.append({**a, "_distance_nm": round(dist, 2)})
+
+        matched.sort(key=lambda x: x.get("_distance_nm", 9999))
+        now_ts = data.get("now", time.time())
+        return jsonify({
+            "msg": "No error",
+            "now": now_ts,
+            "total": len(matched),
+            "ctime": now_ts,
+            "ptime": 0,
+            "aircraft": matched,
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "aircraft": []}), 503
+
+
+@bp.route("/outputs/stream/<string:raw_key>")
+def output_json_stream(raw_key):
+    """Public JSON aircraft stream — authenticated by API key in URL."""
+    from models import OutputKeyModel
+    output = OutputKeyModel.validate(raw_key)
+    if not output:
+        return jsonify({"error": "Invalid or inactive API key"}), 401
+    if output.get("output_type") != "json":
+        return jsonify({"error": "This key is for a beast_raw output, not JSON"}), 400
+    raw_config = output.get("config")
+    if isinstance(raw_config, dict):
+        _stream_config = raw_config
+    else:
+        try:
+            _stream_config = json.loads(str(raw_config or "{}"))
+        except (TypeError, ValueError):
+            _stream_config = {}
+    if _stream_config.get("range_api"):
+        return jsonify({"error": "This key is for Range API, not Stream. Use /api/outputs/range/point/<lat>/<lon>/<radius_nm>?key=..."}), 400
+
+    # Output config: include_network_adsb False => only direct feeder traffic (exclude source=adsbhub)
+    config = _stream_config
+    # Normalize to bool: checkbox unchecked => False; default True for backward compat
+    v = config.get("include_network_adsb", True)
+    include_network = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("false", "0", "no", ""))
+
+    try:
+        resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if resp.status_code != 200:
+            return jsonify({"error": "Upstream data unavailable"}), 503
+        if include_network:
+            return Response(resp.content, content_type="application/json",
+                            headers={"Access-Control-Allow-Origin": "*"})
+        data = resp.json()
+        aircraft = data.get("aircraft", [])
+        direct_only = [a for a in aircraft if (a.get("source") or "").lower() != "adsbhub"]
+        out = {"aircraft": direct_only, "now": data.get("now"), "messages": data.get("messages", 0)}
+        body = json.dumps(out).encode()
+        return Response(body, content_type="application/json",
+                        headers={"Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 503
+
+
+def _json_output_v2_data(raw_key: str):
+    """Load tar1090 aircraft and apply output-level JSON filters."""
+    _out, config, err = _coerce_json_output_for_v2(raw_key)
+    if err is not None:
+        return None, None, err
+    try:
+        started = time.perf_counter()
+        upstream = http_requests.get(VESSELS_JSON_URL, timeout=5)
+        if upstream.status_code != 200:
+            return None, None, _output_v2_error("Upstream data unavailable", 503)
+        payload = upstream.json()
+        aircraft = payload.get("aircraft", [])
+        aircraft = _filter_aircraft_for_json_output(aircraft, config)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        return payload, (aircraft, elapsed_ms), None
+    except Exception as e:
+        return None, None, _output_v2_error(str(e), 503)
+
+
+def _json_output_v2_finalize(payload, aircraft, ptime_ms):
+    return jsonify(_output_v2_envelope(aircraft, payload.get("now", time.time()), ptime_ms)), 200
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/health")
+def output_json_v2_health(raw_key):
+    _payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    _, ptime_ms = data
+    return jsonify({
+        "status": "ok",
+        "key_valid": True,
+        "ptype": "json",
+        "ptime": round(float(ptime_ms), 2),
+    }), 200
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/all")
+def output_json_v2_all(raw_key):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    return _json_output_v2_finalize(payload, aircraft, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/hex/<string:hex_code>")
+def output_json_v2_hex(raw_key, hex_code):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    wanted = (hex_code or "").strip().lower()
+    filtered = [a for a in aircraft if str(a.get("hex", "")).lower() == wanted]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/callsign/<string:callsign>")
+def output_json_v2_callsign(raw_key, callsign):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    wanted = (callsign or "").strip().lower()
+    filtered = [a for a in aircraft if str(a.get("flight", "")).strip().lower() == wanted]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/reg/<string:reg>")
+def output_json_v2_reg(raw_key, reg):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    wanted = (reg or "").strip().lower()
+    filtered = [a for a in aircraft if str(a.get("r", "")).strip().lower() == wanted]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/type/<string:type_code>")
+def output_json_v2_type(raw_key, type_code):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    wanted = (type_code or "").strip().lower()
+    filtered = [a for a in aircraft if str(a.get("t", "")).strip().lower() == wanted]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/squawk/<string:squawk>")
+def output_json_v2_squawk(raw_key, squawk):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    wanted = (squawk or "").strip().lower()
+    filtered = [a for a in aircraft if str(a.get("squawk", "")).strip().lower() == wanted]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/mil")
+def output_json_v2_mil(raw_key):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+
+    def _is_mil(a):
+        dbf = int(a.get("dbFlags") or 0)
+        return bool(dbf & FLAG_MIL) or bool(a.get("mil"))
+
+    filtered = [a for a in aircraft if _is_mil(a)]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/ladd")
+def output_json_v2_ladd(raw_key):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+
+    def _is_ladd(a):
+        dbf = int(a.get("dbFlags") or 0)
+        return bool(dbf & FLAG_LADD) or bool(a.get("ladd"))
+
+    filtered = [a for a in aircraft if _is_ladd(a)]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/pia")
+def output_json_v2_pia(raw_key):
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+
+    def _is_pia(a):
+        dbf = int(a.get("dbFlags") or 0)
+        return bool(dbf & FLAG_PIA) or bool(a.get("pia"))
+
+    filtered = [a for a in aircraft if _is_pia(a)]
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+@bp.route("/outputs/json/<string:raw_key>/v2/point/<string:lat>/<string:lon>/<string:radius_nm>")
+def output_json_v2_point(raw_key, lat, lon, radius_nm):
+    try:
+        c_lat = float(lat)
+        c_lon = float(lon)
+        c_nm = min(max(0.0, float(radius_nm)), 250.0)
+    except (TypeError, ValueError):
+        return _output_v2_error("Invalid lat, lon, or radius_nm", 400)
+
+    payload, data, err = _json_output_v2_data(raw_key)
+    if err is not None:
+        return err
+    aircraft, ptime_ms = data
+    filtered = []
+    for a in aircraft:
+        a_lat, a_lon = a.get("lat"), a.get("lon")
+        if a_lat is None or a_lon is None:
+            continue
+        d = _haversine_nm(c_lat, c_lon, a_lat, a_lon)
+        if d <= c_nm:
+            filtered.append({**a, "_distance_nm": round(d, 2)})
+    filtered.sort(key=lambda x: x.get("_distance_nm", 9999))
+    return _json_output_v2_finalize(payload, filtered, ptime_ms)
+
+
+# ── Feeder Proxy (nginx handles actual proxying, Flask handles auth) ───────────
+
+import re as _re
+import urllib.parse as _urlparse
+
+def _feeder_proxy_url(feeder, view_type):
+    """Build the /feeder-view/<ip>:<port>/... URL for a given feeder and view type."""
+    if view_type == "map":
+        raw = (feeder.get("tar1090_url") or "").rstrip("/")
+    elif view_type == "graphs":
+        raw = (feeder.get("graphs1090_url") or "").rstrip("/")
+    else:
+        return None
+    if not raw:
+        return None
+    parsed = _urlparse.urlparse(raw)
+    host = parsed.hostname or feeder.get("ip_address", "")
+    port = parsed.port or 8080
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"/feeder-view/{host}:{port}{path}"
+
+
+@bp.route("/feeder-view-auth")
+def feeder_view_auth():
+    """nginx auth_request sub-endpoint. Returns 200 if user has a valid session,
+    401 otherwise. NetBird IPs are only routable within the mesh so no further
+    IP validation is required."""
+    from flask_login import current_user
+    if not current_user.is_authenticated:
+        return Response("Unauthorized", status=401)
+    return Response("OK", status=200)
+
+
+@bp.route("/feeder-proxy/<int:feeder_id>/<view_type>")
+@login_required_any
+def feeder_proxy(feeder_id, view_type):
+    """Return a redirect to the nginx-proxied feeder URL."""
+    feeder = FeederModel.get_by_id(feeder_id)
+    if not feeder:
+        return "Feeder not found", 404
+    if not user_can_access_feeder(feeder, current_user.username, current_user.role):
+        return "Not authorized", 403
+
+    proxy_url = _feeder_proxy_url(feeder, view_type)
+    if not proxy_url:
+        return f"No {'map' if view_type == 'map' else 'stats'} URL configured for this feeder", 404
+
+    from flask import redirect
+    return redirect(proxy_url)
