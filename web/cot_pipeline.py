@@ -44,8 +44,8 @@ if not _logger.handlers:
 log = _logger
 log.setLevel(logging.INFO)
 
-_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "network", "adsbhub"})
-_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "network")
+_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "aiscatcher", "aisfriends", "network", "adsbhub"})
+_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "aiscatcher", "aisfriends", "network")
 
 
 def _is_network_remote_source(src):

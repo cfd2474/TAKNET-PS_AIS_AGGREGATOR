@@ -115,7 +115,7 @@ async function loadDashboard() {
             const breakdownEl = document.getElementById('stat-aircraft-breakdown');
             if (breakdownEl) {
                 if (ac.direct != null || ac.network != null) {
-                    breakdownEl.textContent = (direct || 0) + ' direct (feeders) · ' + (network || 0) + ' network (AIShub/AISstream)';
+                    breakdownEl.textContent = (direct || 0) + ' direct (feeders) · ' + (network || 0) + ' network (AIShub / AISstream / aiscatcher / AIS Friends)';
                     breakdownEl.style.display = '';
                 } else {
                     breakdownEl.style.display = 'none';

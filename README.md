@@ -41,6 +41,8 @@ Environment highlights:
 - **`NETWORK_FEEDS_STATUS_PATH`** — shared directory for connector status files (`feed.json`, `receive.json`). Legacy **`ADSBHUB_STATUS_PATH`** is still read as a fallback for the same path.
 - **`NETWORK_FEED_OUTBOUND_ENABLED`** / **`NETWORK_FEED_INBOUND_ENABLED`** — toggles for Config → Services (legacy **`ADSBHUB_FEED_ENABLED`** / **`ADSBHUB_RECEIVE_ENABLED`** still honored if the new keys are unset).
 - **`AISSTREAM_API_KEY`**, **`AISHUB_POLL_URL`** — optional credentials for connector containers.
+- **aiscatcher.org exchange** — same variables as [docker-shipfeeder / Feeding AIS Aggregator Services](https://github.com/sdr-enthusiasts/docker-shipfeeder?tab=readme-ov-file#feeding-ais-aggregator-services): **`AISCATCHER_SHAREDATA`** (`true`/`false`), optional **`AISCATCHER_FEEDER_KEY`** (UUID from [aiscatcher.org](https://www.aiscatcher.org/) join), optional **`AISCATCHER_SHAREKEY`** (reserved for future exchange options). Config → Services persists these to `.env`. Merged vessel rows should use `source` containing `aiscatcher` so outputs and CoT treat them as network traffic.
+- **AIS Friends (API v1)** — bidirectional HTTP/API integration per [AIS Friends API v1 documentation](https://www.aisfriends.com/docs/api/v1): **`AISFRIENDS_API_V1_ENABLED`**, **`AISFRIENDS_API_KEY`** (token or key from your account; use the header/query style the docs specify in your connector), optional **`AISFRIENDS_API_BASE_URL`** (override if not using the default `…/api/v1` host), optional **`AISFRIENDS_STATION_ID`** (if the API scopes requests to a station). UDP ingestion from a dedicated receiver remains the shipfeeder **`AISFRIENDS_UDP_PORT`** path. Tag merged rows with `source` containing **`aisfriends`** for network filtering.
 
 ---
 

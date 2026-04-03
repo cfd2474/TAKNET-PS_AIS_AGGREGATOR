@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.1.4",
+    "date": "2026-04-02",
+    "notes": "AIS Friends API v1 (bidirectional): AISFRIENDS_API_V1_ENABLED, AISFRIENDS_API_KEY, optional AISFRIENDS_API_BASE_URL and AISFRIENDS_STATION_ID in Services and /api/settings/network_feeds. Remote source aisfriends for stats, outputs, CoT. Docs link https://www.aisfriends.com/docs/api/v1; compose stub taknet-aisfriends-connector; restart hook updated. Clarifies UDP path remains AISFRIENDS_UDP_PORT in shipfeeder."
+  },
+  {
+    "version": "0.1.3",
+    "date": "2026-04-02",
+    "notes": "aiscatcher.org exchange: AISCATCHER_SHAREDATA, AISCATCHER_FEEDER_KEY, AISCATCHER_SHAREKEY in Config → Services and /api/settings/network_feeds (aligned with docker-shipfeeder env names). Remote source detection includes aiscatcher for stats, outputs, and CoT. Commented compose stub for taknet-aiscatcher-connector; restart hook includes that container name when present."
+  },
+  {
+    "version": "0.1.2",
+    "date": "2026-04-02",
+    "notes": "Web update (Config → Updates): match ADS-B flow — clone, copy to INSTALL_DIR, docker compose pull, explicit build of dashboard + ais-proxy + ais-core, PRE_RESTART + up -d. Fixes compose build failing on non-existent api/nginx services. Updates page SSH hint uses taknet-ais update."
+  },
+  {
     "version": "0.1.1",
     "date": "2026-04-02",
     "notes": "Services: replace ADSBHub with network feeds (AIShub/AISstream). New API /api/settings/network_feeds and status key network_feeds; NETWORK_FEED_* env vars; output/CoT filtering uses shared remote-source detection."

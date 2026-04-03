@@ -79,6 +79,40 @@ services:
       ais-core:
         condition: service_started
 
+  # Optional: aiscatcher.org exchange connector (reads AISCATCHER_* from host .env).
+  # Implement ./aiscatcher-connector and merge into VESSELS_JSON_URL via vessel-merger when ready.
+  # aiscatcher-connector:
+  #   build:
+  #     context: ./aiscatcher-connector
+  #   container_name: taknet-aiscatcher-connector
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     - AISCATCHER_SHAREDATA=${AISCATCHER_SHAREDATA:-false}
+  #     - AISCATCHER_FEEDER_KEY=${AISCATCHER_FEEDER_KEY:-}
+  #     - AISCATCHER_SHAREKEY=${AISCATCHER_SHAREKEY:-}
+  #   volumes:
+  #     - ./var:/app/var
+  #   networks:
+  #     - taknet-ais-internal
+
+  # Optional: AIS Friends API v1 bidirectional connector — see https://www.aisfriends.com/docs/api/v1
+  # aisfriends-connector:
+  #   build:
+  #     context: ./aisfriends-connector
+  #   container_name: taknet-aisfriends-connector
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     - AISFRIENDS_API_V1_ENABLED=${AISFRIENDS_API_V1_ENABLED:-false}
+  #     - AISFRIENDS_API_KEY=${AISFRIENDS_API_KEY:-}
+  #     - AISFRIENDS_API_BASE_URL=${AISFRIENDS_API_BASE_URL:-}
+  #     - AISFRIENDS_STATION_ID=${AISFRIENDS_STATION_ID:-}
+  #   volumes:
+  #     - ./var:/app/var
+  #   networks:
+  #     - taknet-ais-internal
+
   # api:
   #   build:
   #     context: ./api-server

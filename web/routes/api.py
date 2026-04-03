@@ -30,7 +30,7 @@ READSB_HOST = os.environ.get("READSB_HOST", "ais-core")
 SITE_NAME = os.environ.get("SITE_NAME", "TAKNET-PS AIS Aggregator")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "cfd2474/TAKNET-PS_AIS_AGGREGATOR")
 INSTALL_DIR = os.environ.get("INSTALL_DIR", "/opt/taknet-ais-aggregator")
-# Merged vessels (local + optional AIShub/AISstream) when vessel-merger is used
+# Merged vessels (local + optional AIShub / AISstream / aiscatcher.org / AIS Friends) when vessel-merger is used
 VESSELS_JSON_URL = os.environ.get(
     "VESSELS_JSON_URL",
     os.environ.get("AIRCRAFT_JSON_URL", "http://ais-core:4001/data/vessels.json"),
@@ -41,12 +41,12 @@ NETWORK_FEEDS_STATUS_PATH = os.environ.get(
     os.environ.get("ADSBHUB_STATUS_PATH", "/app/var/network-feeds-status"),
 )
 
-_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "network", "adsbhub"})
-_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "network")
+_NETWORK_REMOTE_EXACT = frozenset({"aishub", "aisstream", "aiscatcher", "aisfriends", "network", "adsbhub"})
+_NETWORK_REMOTE_SUBSTR = ("aishub", "aisstream", "aiscatcher", "aisfriends", "network")
 
 
 def _is_network_remote_source(src):
-    """True if vessel row came from AIShub, AISstream, or generic network ingest (legacy adsbhub tag included)."""
+    """True if vessel row came from AIShub, AISstream, aiscatcher.org, AIS Friends, or generic network ingest (legacy adsbhub tag included)."""
     s = (src or "").strip().lower()
     if s in _NETWORK_REMOTE_EXACT:
         return True
@@ -110,7 +110,7 @@ echo "Pulling updated images..."
 cd {INSTALL_DIR}
 docker compose pull 2>&1
 echo "Building local images..."
-docker compose build dashboard ais-proxy ais-core api nginx 2>&1
+docker compose build dashboard ais-proxy ais-core 2>&1
 echo "PRE_RESTART"
 sleep 3
 echo "Restarting containers..."
@@ -1028,7 +1028,7 @@ def _read_env_value(key, default=""):
     return default
 
 
-# ── Network feeds (AIShub / AISstream) — Config → Services ───────────────────
+# ── Network feeds (AIShub / AISstream / aiscatcher.org / AIS Friends) —──────
 
 @bp.route("/settings/network_feeds", methods=["GET"])
 @admin_required
@@ -1036,11 +1036,23 @@ def get_network_feeds_settings():
     """Return outbound/inbound toggles and credential presence from .env."""
     ais_key = (_read_env_value("AISSTREAM_API_KEY", "") or "").strip()
     hub_url = (_read_env_value("AISHUB_POLL_URL", "") or "").strip()
+    ac_feeder = (_read_env_value("AISCATCHER_FEEDER_KEY", "") or "").strip()
+    ac_share = (_read_env_value("AISCATCHER_SHAREKEY", "") or "").strip()
+    af_key = (_read_env_value("AISFRIENDS_API_KEY", "") or "").strip()
+    af_base = (_read_env_value("AISFRIENDS_API_BASE_URL", "") or "").strip()
+    af_station = (_read_env_value("AISFRIENDS_STATION_ID", "") or "").strip()
     return jsonify({
         "feed_enabled": _read_network_feed_outbound_enabled(),
         "receive_enabled": _read_network_feed_inbound_enabled(),
         "aisstream_api_key_present": bool(ais_key),
         "aishub_poll_url_present": bool(hub_url),
+        "aiscatcher_sharedata": _read_env_truthy("AISCATCHER_SHAREDATA", False),
+        "aiscatcher_feeder_key_present": bool(ac_feeder),
+        "aiscatcher_sharekey_present": bool(ac_share),
+        "aisfriends_api_v1_enabled": _read_env_truthy("AISFRIENDS_API_V1_ENABLED", False),
+        "aisfriends_api_key_present": bool(af_key),
+        "aisfriends_api_base_url_present": bool(af_base),
+        "aisfriends_station_id_present": bool(af_station),
         "aisstream_api_key": "",
         "aishub_poll_url": "",
     })
@@ -1048,7 +1060,12 @@ def get_network_feeds_settings():
 
 def _restart_network_feed_containers_background():
     """Run container restarts in background so the HTTP request can return immediately."""
-    for name in ("taknet-aisstream-connector", "taknet-vessel-merger"):
+    for name in (
+        "taknet-aisstream-connector",
+        "taknet-aiscatcher-connector",
+        "taknet-aisfriends-connector",
+        "taknet-vessel-merger",
+    ):
         try:
             restart_container(name)
         except Exception as e:
@@ -1082,6 +1099,32 @@ def set_network_feeds_settings():
         url = (data.get("aishub_poll_url") or "").strip()
         if url:
             _persist_env_var("AISHUB_POLL_URL", url)
+    if "aiscatcher_sharedata" in data:
+        ac_on = bool(data.get("aiscatcher_sharedata"))
+        _persist_env_var("AISCATCHER_SHAREDATA", "true" if ac_on else "false")
+    if "aiscatcher_feeder_key" in data:
+        fk = (data.get("aiscatcher_feeder_key") or "").strip()
+        if fk:
+            _persist_env_var("AISCATCHER_FEEDER_KEY", fk)
+    if "aiscatcher_sharekey" in data:
+        sk = (data.get("aiscatcher_sharekey") or "").strip()
+        if sk:
+            _persist_env_var("AISCATCHER_SHAREKEY", sk)
+    if "aisfriends_api_v1_enabled" in data:
+        af_on = bool(data.get("aisfriends_api_v1_enabled"))
+        _persist_env_var("AISFRIENDS_API_V1_ENABLED", "true" if af_on else "false")
+    if "aisfriends_api_key" in data:
+        afk = (data.get("aisfriends_api_key") or "").strip()
+        if afk:
+            _persist_env_var("AISFRIENDS_API_KEY", afk)
+    if "aisfriends_api_base_url" in data:
+        afb = (data.get("aisfriends_api_base_url") or "").strip()
+        if afb:
+            _persist_env_var("AISFRIENDS_API_BASE_URL", afb.rstrip("/"))
+    if "aisfriends_station_id" in data:
+        afs = (data.get("aisfriends_station_id") or "").strip()
+        if afs:
+            _persist_env_var("AISFRIENDS_STATION_ID", afs)
     _write_receive_enabled_to_volume(receive)
     thread = threading.Thread(target=_restart_network_feed_containers_background, daemon=True)
     thread.start()

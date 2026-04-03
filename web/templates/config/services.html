@@ -3,12 +3,12 @@
 
 {% block content %}
 
-<!-- Network feeds (AIShub / AISstream) -->
+<!-- Network feeds (AIShub / AISstream / aiscatcher.org / AIS Friends) -->
 <div class="card" style="margin-bottom:16px;">
     <div class="card-header">
         <div>
             <h3>Network feeds</h3>
-            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Enable outbound sharing and/or inbound AIShub and AISstream ingest. Connectors read <code>NETWORK_FEED_*</code> and credentials from <code>.env</code>.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:2px;">Enable outbound sharing and/or inbound AIShub, AISstream, <a href="https://www.aiscatcher.org/" target="_blank" rel="noopener">aiscatcher.org</a>, and <a href="https://www.aisfriends.com/" target="_blank" rel="noopener">AIS Friends</a> API v1. Shipfeeder-style env names where applicable (<a href="https://github.com/sdr-enthusiasts/docker-shipfeeder?tab=readme-ov-file#feeding-ais-aggregator-services" target="_blank" rel="noopener">docker-shipfeeder</a>). Connectors read <code>NETWORK_FEED_*</code> and credentials from <code>.env</code>.</p>
         </div>
         <button class="btn btn-primary" id="network-feeds-save-btn" onclick="saveNetworkFeeds()" style="white-space:nowrap;">Save</button>
     </div>
@@ -20,8 +20,44 @@
             </label>
             <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
                 <input type="checkbox" id="network-feed-inbound" class="toggle">
-                <span>Inbound network feed (AIShub / AISstream)</span>
+                <span>Inbound network feed (AIShub / AISstream / aiscatcher.org / AIS Friends)</span>
             </label>
+        </div>
+        <div style="margin-bottom:16px;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);">
+            <p style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:0 0 10px;">AIS Friends — API v1 (bidirectional)</p>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 12px;">Follow <a href="https://www.aisfriends.com/docs/api/v1" target="_blank" rel="noopener">AIS Friends API v1</a> for authentication and endpoint details. UDP feeding from a receiver uses <code>AISFRIENDS_UDP_PORT</code> in shipfeeder; these variables are for HTTP/API-based ingest and push via a connector.</p>
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px;">
+                <input type="checkbox" id="network-feed-aisfriends-api" class="toggle">
+                <span>Enable API v1 connector (<code>AISFRIENDS_API_V1_ENABLED</code>)</span>
+            </label>
+            <label for="network-feed-aisfriends-api-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">API key / token (<code>AISFRIENDS_API_KEY</code>)</label>
+            <input type="password" id="network-feed-aisfriends-api-key" class="form-control" placeholder="From your AIS Friends API credentials"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p id="network-feed-aisfriends-api-key-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:12px;"></p>
+            <label for="network-feed-aisfriends-base-url" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">API base URL (<code>AISFRIENDS_API_BASE_URL</code>) — optional</label>
+            <input type="text" id="network-feed-aisfriends-base-url" class="form-control" placeholder="https://www.aisfriends.com/api/v1"
+                   style="max-width:520px;font-family:monospace;font-size:12px;" autocomplete="off">
+            <p id="network-feed-aisfriends-base-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:12px;"></p>
+            <label for="network-feed-aisfriends-station" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Station / scope ID (<code>AISFRIENDS_STATION_ID</code>) — optional</label>
+            <input type="text" id="network-feed-aisfriends-station" class="form-control" placeholder="If required by the API for your station"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p id="network-feed-aisfriends-station-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>
+        </div>
+        <div style="margin-bottom:16px;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);">
+            <p style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:0 0 10px;">aiscatcher.org exchange</p>
+            <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px;">
+                <input type="checkbox" id="network-feed-aiscatcher-share" class="toggle">
+                <span>Share &amp; receive via exchange (<code>AISCATCHER_SHAREDATA</code>)</span>
+            </label>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 12px 28px;">When enabled, your connector can send local AIS to the community pool and ingest returns. Join at <a href="https://aiscatcher.org/#join" target="_blank" rel="noopener">aiscatcher.org/#join</a> for an optional feeder key.</p>
+            <label for="network-feed-aiscatcher-feeder-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Feeder key (<code>AISCATCHER_FEEDER_KEY</code>) — optional UUID</label>
+            <input type="password" id="network-feed-aiscatcher-feeder-key" class="form-control" placeholder="Optional — from aiscatcher.org after joining"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p id="network-feed-aiscatcher-feeder-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:12px;"></p>
+            <label for="network-feed-aiscatcher-sharekey" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Share key (<code>AISCATCHER_SHAREKEY</code>) — optional</label>
+            <input type="password" id="network-feed-aiscatcher-sharekey" class="form-control" placeholder="Optional — reserved for future AIS-Catcher exchange options"
+                   style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
+            <p id="network-feed-aiscatcher-sharekey-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>
         </div>
         <div style="margin-bottom:16px;">
             <label for="network-feed-aisstream-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">AISstream API key (<code>AISSTREAM_API_KEY</code>)</label>
@@ -184,13 +220,50 @@ async function loadNetworkFeedsSettings() {
     const msgEl = document.getElementById('network-feeds-msg');
     const keyHint = document.getElementById('network-feed-aisstream-key-hint');
     const urlHint = document.getElementById('network-feed-aishub-url-hint');
+    const acFeederHint = document.getElementById('network-feed-aiscatcher-feeder-hint');
+    const acShareHint = document.getElementById('network-feed-aiscatcher-sharekey-hint');
+    const afKeyHint = document.getElementById('network-feed-aisfriends-api-key-hint');
+    const afBaseHint = document.getElementById('network-feed-aisfriends-base-hint');
+    const afStationHint = document.getElementById('network-feed-aisfriends-station-hint');
     try {
         const r = await fetch('/api/settings/network_feeds');
         const d = await r.json();
         document.getElementById('network-feed-outbound').checked = !!d.feed_enabled;
         document.getElementById('network-feed-inbound').checked = !!d.receive_enabled;
+        document.getElementById('network-feed-aisfriends-api').checked = !!d.aisfriends_api_v1_enabled;
+        document.getElementById('network-feed-aiscatcher-share').checked = !!d.aiscatcher_sharedata;
         document.getElementById('network-feed-aisstream-key').value = '';
         document.getElementById('network-feed-aishub-url').value = '';
+        document.getElementById('network-feed-aiscatcher-feeder-key').value = '';
+        document.getElementById('network-feed-aiscatcher-sharekey').value = '';
+        document.getElementById('network-feed-aisfriends-api-key').value = '';
+        document.getElementById('network-feed-aisfriends-base-url').value = '';
+        document.getElementById('network-feed-aisfriends-station').value = '';
+        if (afKeyHint) {
+            afKeyHint.textContent = d.aisfriends_api_key_present
+                ? 'API key is stored. Leave blank to keep it.'
+                : 'No API key stored yet.';
+        }
+        if (afBaseHint) {
+            afBaseHint.textContent = d.aisfriends_api_base_url_present
+                ? 'Base URL is stored. Enter a new URL to replace it.'
+                : 'Optional. Omit to let the connector use its default API v1 base.';
+        }
+        if (afStationHint) {
+            afStationHint.textContent = d.aisfriends_station_id_present
+                ? 'Station ID is stored. Enter a new value to replace it.'
+                : 'Optional — only if your API access is scoped to a station.';
+        }
+        if (acFeederHint) {
+            acFeederHint.textContent = d.aiscatcher_feeder_key_present
+                ? 'Feeder key is stored. Leave blank to keep it.'
+                : 'No feeder key stored yet.';
+        }
+        if (acShareHint) {
+            acShareHint.textContent = d.aiscatcher_sharekey_present
+                ? 'Share key is stored. Leave blank to keep it.'
+                : 'No share key stored yet.';
+        }
         if (keyHint) {
             keyHint.textContent = d.aisstream_api_key_present
                 ? 'API key is stored. Leave blank to keep it.'
@@ -288,13 +361,31 @@ async function saveNetworkFeeds() {
     const receive = document.getElementById('network-feed-inbound').checked;
     const aisKey = document.getElementById('network-feed-aisstream-key').value.trim();
     const hubUrl = document.getElementById('network-feed-aishub-url').value.trim();
+    const acShare = document.getElementById('network-feed-aiscatcher-share').checked;
+    const acFeederKey = document.getElementById('network-feed-aiscatcher-feeder-key').value.trim();
+    const acShareKey = document.getElementById('network-feed-aiscatcher-sharekey').value.trim();
+    const afApi = document.getElementById('network-feed-aisfriends-api').checked;
+    const afKey = document.getElementById('network-feed-aisfriends-api-key').value.trim();
+    const afBase = document.getElementById('network-feed-aisfriends-base-url').value.trim();
+    const afStation = document.getElementById('network-feed-aisfriends-station').value.trim();
     const btn = document.getElementById('network-feeds-save-btn');
     const msgEl = document.getElementById('network-feeds-msg');
     btn.disabled = true;
     msgEl.textContent = 'Saving and restarting network feed services...';
     msgEl.style.color = 'var(--accent)';
     try {
-        const body = { feed_enabled: feed, receive_enabled: receive, aisstream_api_key: aisKey };
+        const body = {
+            feed_enabled: feed,
+            receive_enabled: receive,
+            aisstream_api_key: aisKey,
+            aiscatcher_sharedata: acShare,
+            aiscatcher_feeder_key: acFeederKey,
+            aiscatcher_sharekey: acShareKey,
+            aisfriends_api_v1_enabled: afApi,
+            aisfriends_api_key: afKey,
+            aisfriends_api_base_url: afBase,
+            aisfriends_station_id: afStation,
+        };
         if (hubUrl) body.aishub_poll_url = hubUrl;
         const r = await fetch('/api/settings/network_feeds', {
             method: 'POST',
