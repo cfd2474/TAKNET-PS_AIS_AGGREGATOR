@@ -4,26 +4,258 @@
 
 {% block topbar %}{% endblock %}
 
+{% block extra_head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+{% endblock %}
+
 {% block content %}
-<div class="iframe-toolbar">
-    <span id="map-vessel-count" style="font-size:13px;color:var(--text-secondary);">— vessels</span>
-    <span style="font-size:12px;color:var(--text-muted);">Live map UI can embed here (Leaflet / MapLibre) fed by <code>/data/vessels.json</code> or merged URL from <code>VESSELS_JSON_URL</code>.</span>
+<div style="display:flex;flex-direction:column;height:100vh;width:100%;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;min-height:44px;background:var(--bg-secondary);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;padding-top:8px;padding-bottom:8px;">
+        <span id="map-vessel-stats" style="font-size:13px;color:var(--text-secondary);">Loading…</span>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:var(--text-muted);">View:</span>
+            <button type="button" id="btn-map-combined" class="btn btn-sm btn-primary" title="Merged feed: local feeders + AIShub, AISstream, etc.">Combined (network)</button>
+            <button type="button" id="btn-map-direct" class="btn btn-sm" title="ais-core only — positions from your feeders">Direct (feeders)</button>
+            <span style="font-size:11px;color:var(--text-muted);border-left:1px solid var(--border);padding-left:10px;margin-left:4px;">
+                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3b82f6;vertical-align:middle;margin-right:4px;"></span> feeder/local
+                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f97316;vertical-align:middle;margin:0 4px 0 10px;"></span> network
+            </span>
+        </div>
+    </div>
+    <div id="map-merged-wrap" style="flex:1;display:flex;min-height:0;">
+        <div id="map-ais" style="flex:1;background:var(--bg-primary);min-height:320px;"></div>
+        <div id="map-sidebar" style="width:300px;max-width:42vw;background:var(--bg-secondary);border-left:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;">
+            <div style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;">Vessel</div>
+            <div id="map-sidebar-placeholder" style="padding:20px;color:var(--text-muted);font-size:13px;text-align:center;">Click a vessel on the map for details.</div>
+            <div id="map-sidebar-detail" style="display:none;padding:16px;font-size:13px;overflow-y:auto;">
+                <div style="font-weight:600;font-size:15px;margin-bottom:10px;color:var(--text-primary);" id="sidebar-title">—</div>
+                <table style="width:100%;border-collapse:collapse;">
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);vertical-align:top;">MMSI</td><td style="padding:4px 0;" id="sidebar-mmsi">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">Name</td><td style="padding:4px 0;" id="sidebar-name">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">SOG</td><td style="padding:4px 0;" id="sidebar-sog">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">COG</td><td style="padding:4px 0;" id="sidebar-cog">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">Position</td><td style="padding:4px 0;" id="sidebar-pos">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">Source</td><td style="padding:4px 0;" id="sidebar-source">—</td></tr>
+                    <tr><td style="padding:4px 8px 4px 0;color:var(--text-muted);">Last seen</td><td style="padding:4px 0;" id="sidebar-seen">—</td></tr>
+                </table>
+            </div>
+        </div>
+    </div>
 </div>
-<div class="card" style="margin:16px;border-radius:0;flex:1;min-height:400px;display:flex;align-items:center;justify-content:center;background:var(--bg-card);">
-    <p style="color:var(--text-muted);font-size:14px;max-width:480px;text-align:center;line-height:1.5;">
-        AIS map view — same slot as tar1090 in the ADS-B aggregator. Wire your map component to vessel positions from the aggregator API or static JSON.
-    </p>
-</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
-(async function() {
-    try {
-        const r = await fetch('/api/status');
-        const d = await r.json();
-        const ac = d.aircraft || {};
-        const n = typeof ac === 'object' ? (ac.total || 0) : ac;
-        const el = document.getElementById('map-vessel-count');
-        if (el) el.textContent = n + ' vessels (approx)';
-    } catch (e) {}
-})();
+const SITE_LAT = {{ site_lat | default(33.8753) }};
+const SITE_LON = {{ site_lon | default(-117.5664) }};
+
+const URL_COMBINED = '/api/aircraft.json';
+const URL_DIRECT = '/api/vessels-direct.json';
+
+const COLOR_DIRECT = { fill: '#3b82f6', stroke: '#1e40af' };
+const COLOR_NETWORK = { fill: '#f97316', stroke: '#c2410c' };
+const COLOR_SELECTED = { fill: '#22c55e', stroke: '#15803d' };
+
+let mapMode = 'combined';
+let leafletMap = null;
+let markers = {};
+let selectedKey = null;
+
+function isNetworkSource(src) {
+    const s = (src || '').toString().trim().toLowerCase();
+    if (!s) return false;
+    if (s === 'aishub' || s === 'aisstream' || s === 'aiscatcher' || s === 'aisfriends' || s === 'network' || s === 'adsbhub') return true;
+    return s.includes('aishub') || s.includes('aisstream') || s.includes('aiscatcher') || s.includes('aisfriends') || s.includes('network');
+}
+
+function vesselKey(v) {
+    if (v.mmsi != null && v.mmsi !== '') return 'm' + String(v.mmsi);
+    const h = (v.hex || '').toString().replace(/^~/, '').toUpperCase();
+    if (h && /^[0-9A-F]{6}$/.test(h)) return 'h' + h;
+    const la = v.lat, lo = v.lon;
+    if (la != null && lo != null) return 'p' + String(la) + ',' + String(lo);
+    return 'u' + Math.random().toString(36).slice(2);
+}
+
+function fmtNum(v) {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+}
+
+function fmtSeen(ts) {
+    if (ts == null || ts === '') return '—';
+    const sec = Number(ts);
+    if (!Number.isFinite(sec)) return '—';
+    const now = Date.now() / 1000;
+    const d = Math.max(0, now - sec);
+    if (d < 60) return Math.round(d) + 's ago';
+    if (d < 3600) return Math.round(d / 60) + 'm ago';
+    if (d < 86400) return Math.round(d / 3600) + 'h ago';
+    return Math.round(d / 86400) + 'd ago';
+}
+
+function displaySource(v) {
+    const s = (v.source || '').toString().trim();
+    if (!s) return '—';
+    if (s.toLowerCase() === 'local') return 'Feeder (local)';
+    return s;
+}
+
+function showSidebar(v) {
+    if (!v) {
+        document.getElementById('map-sidebar-placeholder').style.display = 'block';
+        document.getElementById('map-sidebar-detail').style.display = 'none';
+        return;
+    }
+    document.getElementById('map-sidebar-placeholder').style.display = 'none';
+    document.getElementById('map-sidebar-detail').style.display = 'block';
+    const title = (v.name || v.shipname || v.callsign || v.flight || '').toString().trim() || ('MMSI ' + (v.mmsi || '—'));
+    document.getElementById('sidebar-title').textContent = title;
+    document.getElementById('sidebar-mmsi').textContent = v.mmsi != null ? String(v.mmsi) : '—';
+    document.getElementById('sidebar-name').textContent = (v.name || v.shipname || '—').toString() || '—';
+    const sog = fmtNum(v.sog != null ? v.sog : v.speed);
+    document.getElementById('sidebar-sog').textContent = sog != null ? sog.toFixed(1) + ' kn' : '—';
+    const cog = fmtNum(v.cog != null ? v.cog : v.course);
+    document.getElementById('sidebar-cog').textContent = cog != null ? cog.toFixed(0) + '°' : '—';
+    const lat = fmtNum(v.lat), lon = fmtNum(v.lon);
+    document.getElementById('sidebar-pos').textContent = (lat != null && lon != null) ? lat.toFixed(5) + ', ' + lon.toFixed(5) : '—';
+    document.getElementById('sidebar-source').textContent = displaySource(v);
+    document.getElementById('sidebar-seen').textContent = fmtSeen(v.last_seen);
+}
+
+function markerColors(v, selected) {
+    if (selected) return COLOR_SELECTED;
+    if (mapMode === 'direct') return COLOR_DIRECT;
+    return isNetworkSource(v.source) ? COLOR_NETWORK : COLOR_DIRECT;
+}
+
+function initMap() {
+    leafletMap = L.map('map-ais').setView([SITE_LAT, SITE_LON], 8);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19
+    }).addTo(leafletMap);
+    leafletMap.on('click', function(ev) {
+        if (ev.originalEvent && ev.originalEvent.target && ev.originalEvent.target.closest &&
+            ev.originalEvent.target.closest('.leaflet-interactive')) return;
+        selectedKey = null;
+        showSidebar(null);
+        Object.keys(markers).forEach(k => {
+            const m = markers[k];
+            if (!m || !m._v) return;
+            const c = markerColors(m._v, false);
+            m.setStyle({ fillColor: c.fill, color: c.stroke, weight: 1 });
+        });
+    });
+}
+
+function setMapMode(mode) {
+    mapMode = mode;
+    const bComb = document.getElementById('btn-map-combined');
+    const bDir = document.getElementById('btn-map-direct');
+    if (mode === 'combined') {
+        bComb.className = 'btn btn-sm btn-primary';
+        bDir.className = 'btn btn-sm';
+    } else {
+        bComb.className = 'btn btn-sm';
+        bDir.className = 'btn btn-sm btn-primary';
+    }
+    selectedKey = null;
+    showSidebar(null);
+    Object.keys(markers).forEach(k => {
+        try { leafletMap.removeLayer(markers[k]); } catch (e) {}
+        delete markers[k];
+    });
+    refreshVessels();
+}
+
+function refreshVessels() {
+    if (!leafletMap) return;
+    const url = mapMode === 'direct' ? URL_DIRECT : URL_COMBINED;
+    fetch(url + '?t=' + Date.now())
+        .then(r => r.json())
+        .then(data => {
+            const list = data.aircraft || data.vessels || [];
+            const withPos = list.filter(v => v && fmtNum(v.lat) != null && fmtNum(v.lon) != null);
+            const net = withPos.filter(v => isNetworkSource(v.source)).length;
+            const loc = withPos.length - net;
+            let stats = withPos.length + ' with position / ' + list.length + ' total';
+            if (mapMode === 'combined')
+                stats += ' · ' + loc + ' feeder · ' + net + ' network';
+            document.getElementById('map-vessel-stats').textContent = stats;
+
+            const byKey = {};
+            withPos.forEach(v => { byKey[vesselKey(v)] = v; });
+
+            Object.keys(markers).forEach(k => {
+                if (!byKey[k]) {
+                    leafletMap.removeLayer(markers[k]);
+                    delete markers[k];
+                    if (selectedKey === k) { selectedKey = null; showSidebar(null); }
+                }
+            });
+
+            Object.keys(byKey).forEach(k => {
+                const v = byKey[k];
+                const lat = fmtNum(v.lat), lon = fmtNum(v.lon);
+                const label = (v.name || v.shipname || '').toString().trim() || ('MMSI ' + (v.mmsi || k));
+                const sog = fmtNum(v.sog != null ? v.sog : v.speed);
+                const tipText = label + (sog != null ? ' · ' + sog.toFixed(1) + ' kn' : '');
+                const sel = selectedKey === k;
+                const c = markerColors(v, sel);
+
+                if (markers[k]) {
+                    markers[k].setLatLng([lat, lon]);
+                    markers[k]._v = v;
+                    markers[k].setStyle({ fillColor: c.fill, color: c.stroke, weight: sel ? 2 : 1 });
+                    const tt = markers[k].getTooltip();
+                    if (tt) tt.setContent(tipText);
+                } else {
+                    const m = L.circleMarker([lat, lon], {
+                        radius: 8,
+                        fillColor: c.fill,
+                        color: c.stroke,
+                        weight: sel ? 2 : 1,
+                        fillOpacity: 0.9
+                    });
+                    m._v = v;
+                    m.bindTooltip(tipText, { direction: 'top' });
+                    m.on('click', function(ev) {
+                        L.DomEvent.stopPropagation(ev);
+                        if (ev.originalEvent) { ev.originalEvent.stopPropagation(); ev.originalEvent.preventDefault(); }
+                        const ac = (ev.target && ev.target._v) || v;
+                        selectedKey = vesselKey(ac);
+                        showSidebar(ac);
+                        Object.keys(markers).forEach(h => {
+                            const mm = markers[h];
+                            if (!mm || !mm._v) return;
+                            const cc = markerColors(mm._v, h === selectedKey);
+                            mm.setStyle({ fillColor: cc.fill, color: cc.stroke, weight: h === selectedKey ? 2 : 1 });
+                        });
+                    });
+                    m.addTo(leafletMap);
+                    markers[k] = m;
+                }
+            });
+
+            if (selectedKey && byKey[selectedKey]) showSidebar(byKey[selectedKey]);
+        })
+        .catch(() => {
+            document.getElementById('map-vessel-stats').textContent = 'Could not load vessel data';
+        });
+}
+
+document.getElementById('btn-map-combined').onclick = function() { setMapMode('combined'); };
+document.getElementById('btn-map-direct').onclick = function() { setMapMode('direct'); };
+
+initMap();
+setMapMode('combined');
+setInterval(function() { refreshVessels(); }, 4000);
+
+setTimeout(function() {
+    if (leafletMap) leafletMap.invalidateSize();
+}, 100);
 </script>
 {% endblock %}

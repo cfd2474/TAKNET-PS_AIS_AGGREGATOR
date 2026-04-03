@@ -60,7 +60,10 @@ services:
       - INSTALL_DIR=${INSTALL_DIR:-/opt/taknet-ais-aggregator}
       - GITHUB_REPO=${GITHUB_REPO:-cfd2474/TAKNET-PS_AIS_AGGREGATOR}
       - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
+      - DIRECT_VESSELS_JSON_URL=${DIRECT_VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
       - READSB_HOST=${READSB_HOST:-ais-core}
+      - SITE_LAT=${SITE_LAT:-33.8753}
+      - SITE_LON=${SITE_LON:--117.5664}
       - NETWORK_FEEDS_STATUS_PATH=/app/var/network-feeds-status
       - RESEND_ENABLED=${RESEND_ENABLED:-false}
       - RESEND_API_KEY=${RESEND_API_KEY:-}

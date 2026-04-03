@@ -1,4 +1,6 @@
 """Misc page routes."""
+import os
+
 from flask import Blueprint, render_template, abort
 from flask_login import current_user
 from routes.auth_utils import login_required_any, network_admin_required, admin_required
@@ -6,10 +8,21 @@ from models import OutputModel
 
 bp = Blueprint("pages", __name__)
 
+
+def _map_site_coords():
+    try:
+        lat = float(os.environ.get("SITE_LAT", "33.8753"))
+        lon = float(os.environ.get("SITE_LON", "-117.5664"))
+        return lat, lon
+    except (TypeError, ValueError):
+        return 33.8753, -117.5664
+
+
 @bp.route("/map")
 @login_required_any
 def map_page():
-    return render_template("map.html")
+    lat, lon = _map_site_coords()
+    return render_template("map.html", site_lat=lat, site_lon=lon)
 
 
 @bp.route("/stats")

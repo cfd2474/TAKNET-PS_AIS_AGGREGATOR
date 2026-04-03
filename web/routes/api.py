@@ -36,6 +36,11 @@ VESSELS_JSON_URL = os.environ.get(
     "VESSELS_JSON_URL",
     os.environ.get("AIRCRAFT_JSON_URL", "http://ais-core:4001/data/vessels.json"),
 )
+# ais-core only (feeders → proxy → core) — for Direct map; merged URL may include AIShub/AISstream/etc.
+DIRECT_VESSELS_JSON_URL = os.environ.get(
+    "DIRECT_VESSELS_JSON_URL",
+    f"http://{READSB_HOST}:4001/data/vessels.json",
+)
 # Shared volume: network feed connector status (AIShub receive, AISstream, etc.)
 NETWORK_FEEDS_STATUS_PATH = os.environ.get(
     "NETWORK_FEEDS_STATUS_PATH",
@@ -519,14 +524,27 @@ def aircraft():
 @bp.route("/aircraft.json")
 @login_required_any
 def aircraft_json():
-    """Full aircraft.json from merger (for Merged map); avoids nginx /data/ routing."""
+    """Full merged vessels.json (same as VESSELS_JSON_URL) for Combined map."""
     try:
         resp = http_requests.get(VESSELS_JSON_URL, timeout=5)
         if resp.status_code == 200:
             return Response(resp.content, mimetype="application/json")
     except Exception:
         pass
-    return jsonify({"aircraft": [], "now": 0, "messages": 0})
+    return jsonify({"aircraft": [], "vessels": [], "now": 0, "messages": 0})
+
+
+@bp.route("/vessels-direct.json")
+@login_required_any
+def vessels_direct_json():
+    """ais-core local vessels only (feeder-derived) for Direct map."""
+    try:
+        resp = http_requests.get(DIRECT_VESSELS_JSON_URL, timeout=5)
+        if resp.status_code == 200:
+            return Response(resp.content, mimetype="application/json")
+    except Exception:
+        pass
+    return jsonify({"aircraft": [], "vessels": [], "now": 0, "messages": 0})
 
 
 # ── Diagnostics ─────────────────────────────────────────────────────────

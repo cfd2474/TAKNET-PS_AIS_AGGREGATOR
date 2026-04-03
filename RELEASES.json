@@ -1,5 +1,10 @@
 [
   {
+    "version": "0.1.6",
+    "date": "2026-04-02",
+    "notes": "Map (/map): Leaflet OSM with Combined (network) vs Direct (feeders) like ADS-B merged/tar1090 split. Combined uses VESSELS_JSON_URL via /api/aircraft.json; Direct uses DIRECT_VESSELS_JSON_URL (default ais-core) via /api/vessels-direct.json. Orange markers for network source tags; SITE_LAT/SITE_LON for default center."
+  },
+  {
     "version": "0.1.5",
     "date": "2026-04-02",
     "notes": "Fix dashboard auto-update (docker:cli exit 1): INSTALL_DIR was /app so Docker bind-mounted the host /app instead of the real install tree. Compose now uses INSTALL_DIR from .env (default /opt/taknet-ais-aggregator) for dashboard mounts (.env, var, VERSION, RELEASES) like ADS-B; docker.sock rw. Update script installs git in docker:cli if missing, quotes paths, and compose pull no longer fails the whole run. Abort update early with a clear message if INSTALL_DIR is still /app."

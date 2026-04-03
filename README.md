@@ -26,17 +26,19 @@ Distributed **AIS** (marine vessel tracking) aggregation stack. The **`web/`** d
 | **Auth** | `/login`, `/register`, `/pending`, `/profile`, `/forgot-password`, `/reset-password/<token>` |
 | **Dashboard** | `/`, `/dashboard` — stats, feeder breakdown, system health, network-feed status, activity |
 | **Inputs** | `/inputs/feeders`, `/inputs/feeder/<id>` — feeder registry & detail |
-| **Map** | `/map` — placeholder for vessel map (embed `vessels.json`) |
+| **Map** | `/map` — Leaflet: **Combined (network)** (`VESSELS_JSON_URL` / merger) vs **Direct (feeders)** (`DIRECT_VESSELS_JSON_URL` → ais-core); legend colors by `source` |
 | **Statistics** | `/stats` — graphs slot (embed when ready) |
 | **Outputs** | `/outputs`, CoT proxy pages — JSON / CoT outputs (schema shared with ADS-B) |
 | **Config** | `/config` — VPN, services (Docker), health, diagnostics, updates, **users** |
-| **API (dashboard)** | `/api/*` — status, feeders, vessels.json proxy, docker, VPN, updates, settings, outputs, diagnostics |
+| **API (dashboard)** | `/api/*` — status, feeders, `/api/aircraft.json` (combined), `/api/vessels-direct.json` (feeders), docker, VPN, updates, settings, outputs, diagnostics |
 | **About** | `/about` |
 | **Feeder tunnel** | `/feeder` WebSocket paths — when `feeder_tunnel` module loads |
 
 Environment highlights:
 
-- **`VESSELS_JSON_URL`** — merged or local JSON (default in Compose: `http://ais-core:4001/data/vessels.json`). Legacy **`AIRCRAFT_JSON_URL`** is still read as a fallback key for the same setting.
+- **`VESSELS_JSON_URL`** — merged JSON for the **Combined** map and dashboard counts (default: ais-core only until a merger service is added). Legacy **`AIRCRAFT_JSON_URL`** is still read as a fallback key for the same setting.
+- **`DIRECT_VESSELS_JSON_URL`** — ais-core **feeder-only** JSON for the **Direct** map (default `http://<READSB_HOST>:4001/data/vessels.json`).
+- **`SITE_LAT`** / **`SITE_LON`** — default map center on `/map`.
 - **`GITHUB_REPO`** — OTA updates clone target (default `cfd2474/TAKNET-PS_AIS_AGGREGATOR`).
 - **`NETWORK_FEEDS_STATUS_PATH`** — shared directory for connector status files (`feed.json`, `receive.json`). Legacy **`ADSBHUB_STATUS_PATH`** is still read as a fallback for the same path.
 - **`NETWORK_FEED_OUTBOUND_ENABLED`** / **`NETWORK_FEED_INBOUND_ENABLED`** — toggles for Config → Services (legacy **`ADSBHUB_FEED_ENABLED`** / **`ADSBHUB_RECEIVE_ENABLED`** still honored if the new keys are unset).
