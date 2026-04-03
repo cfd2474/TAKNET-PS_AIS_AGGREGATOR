@@ -30,7 +30,11 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 READSB_HOST = os.environ.get("READSB_HOST", "ais-core")
 SITE_NAME = os.environ.get("SITE_NAME", "TAKNET-PS AIS Aggregator")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "cfd2474/TAKNET-PS_AIS_AGGREGATOR")
-INSTALL_DIR = os.environ.get("INSTALL_DIR", "/opt/taknet-ais-aggregator")
+
+
+def _install_dir():
+    """Host install root for .env and updates — read at call time so it matches the process environment."""
+    return (os.environ.get("INSTALL_DIR") or "/opt/taknet-ais-aggregator").rstrip("/")
 # Merged vessels (local + optional AIShub / AISstream / aiscatcher.org / AIS Friends) when vessel-merger is used
 VESSELS_JSON_URL = os.environ.get(
     "VESSELS_JSON_URL",
@@ -81,7 +85,7 @@ def _run_update():
     try:
         # Read current version from .env-mounted path
         try:
-            old_ver = open(os.path.join(INSTALL_DIR, "VERSION")).read().strip()
+            old_ver = open(os.path.join(_install_dir(), "VERSION")).read().strip()
         except Exception:
             pass
 
@@ -96,7 +100,8 @@ def _run_update():
             pass
 
         # Dashboard compose must set INSTALL_DIR to the host install root, not /app (see docker-compose.yml).
-        _id_norm = (INSTALL_DIR or "").rstrip("/")
+        inst = _install_dir()
+        _id_norm = inst.rstrip("/")
         if _id_norm == "/app":
             log(
                 "Update aborted: INSTALL_DIR is /app. Docker would bind-mount the host's /app (wrong). "
@@ -108,7 +113,7 @@ def _run_update():
 
         # INSTALL_DIR must be the host-absolute install root (e.g. /opt/taknet-ais-aggregator).
         # If it is a container-only path like /app, Docker binds the host's /app and compose fails.
-        inst_q = shlex.quote(INSTALL_DIR)
+        inst_q = shlex.quote(inst)
         repo_safe = GITHUB_REPO.replace("'", "'\"'\"'")
 
         # Shell script runs in docker:cli; host install dir is bind-mounted at INSTALL_DIR.
@@ -154,13 +159,13 @@ echo "DONE:$NEW_VER"
 
         volumes = {
             "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
-            INSTALL_DIR:            {"bind": INSTALL_DIR,            "mode": "rw"},
+            inst: {"bind": inst, "mode": "rw"},
         }
         compose_container = client.containers.create(
             "docker:cli",
             command=["sh", "-c", script],
             volumes=volumes,
-            working_dir=INSTALL_DIR,
+            working_dir=inst,
         )
         compose_container.start()
 
@@ -962,7 +967,7 @@ def updates_releases():
     limit = request.args.get("limit", 6, type=int)
     try:
         for path in ["/app/RELEASES.json",
-                     os.path.join(INSTALL_DIR, "RELEASES.json"),
+                     os.path.join(_install_dir(), "RELEASES.json"),
                      os.path.join(os.path.dirname(os.path.dirname(__file__)), "RELEASES.json")]:
             if os.path.exists(path):
                 with open(path) as f:
@@ -1004,41 +1009,67 @@ def _env_value_escape(value):
     return value
 
 
+def _env_line_logical_content(line):
+    """Strip whitespace, BOM, comments, and optional 'export ' prefix so KEY= can be matched."""
+    if not line:
+        return ""
+    s = line.strip()
+    if s.startswith("\ufeff"):
+        s = s[1:].lstrip()
+    if not s or s.startswith("#"):
+        return ""
+    if s.startswith("export "):
+        s = s[7:].lstrip()
+    return s
+
+
+def _env_line_defines_key(logical, key):
+    if not logical:
+        return False
+    return logical.startswith(f"{key}=") or logical.startswith(f"{key} =")
+
+
 def _persist_env_var(key, value):
-    """Write or update a key=value line in the host .env file. Value is escaped for .env safety."""
-    env_path = os.path.join(INSTALL_DIR, ".env")
+    """Write or update a key=value line in the host .env file. Returns False if the write failed."""
+    env_path = os.path.join(_install_dir(), ".env")
     safe_value = _env_value_escape(value)
     try:
         if os.path.exists(env_path):
-            with open(env_path, "r") as f:
+            with open(env_path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             found = False
             for i, line in enumerate(lines):
-                if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                logical = _env_line_logical_content(line)
+                if _env_line_defines_key(logical, key):
                     lines[i] = f"{key}={safe_value}\n"
                     found = True
                     break
             if not found:
                 lines.append(f"{key}={safe_value}\n")
-            with open(env_path, "w") as f:
+            with open(env_path, "w", encoding="utf-8", newline="\n") as f:
                 f.writelines(lines)
         else:
-            with open(env_path, "w") as f:
+            parent = os.path.dirname(env_path)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, mode=0o755, exist_ok=True)
+            with open(env_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"{key}={safe_value}\n")
+        return True
     except Exception as e:
-        print(f"[api] Failed to persist {key} to .env: {e}")
+        print(f"[api] Failed to persist {key} to {env_path}: {e}")
+        return False
 
 
 def _read_env_bool(key, default=False):
     """Read a key from the host .env and return True only if value is 'true' (case-insensitive)."""
-    env_path = os.path.join(INSTALL_DIR, ".env")
+    env_path = os.path.join(_install_dir(), ".env")
     try:
         if os.path.exists(env_path):
-            with open(env_path, "r") as f:
+            with open(env_path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    line = line.strip()
-                    if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                    logical = _env_line_logical_content(line)
+                    if _env_line_defines_key(logical, key):
+                        val = logical.split("=", 1)[1].strip().strip('"').strip("'").lower()
                         return val == "true"
     except Exception:
         pass
@@ -1055,14 +1086,14 @@ def _read_env_truthy(key, default=False):
 
 def _read_env_value(key, default=""):
     """Read a key from the host .env and return the raw value (stripping surrounding quotes)."""
-    env_path = os.path.join(INSTALL_DIR, ".env")
+    env_path = os.path.join(_install_dir(), ".env")
     try:
         if os.path.exists(env_path):
-            with open(env_path, "r") as f:
+            with open(env_path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    line = line.strip()
-                    if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
-                        val = line.split("=", 1)[1].strip()
+                    logical = _env_line_logical_content(line)
+                    if _env_line_defines_key(logical, key):
+                        val = logical.split("=", 1)[1].strip()
                         if len(val) >= 2 and val.startswith("'") and val.endswith("'"):
                             val = val[1:-1].replace("'\"'\"'", "'")
                         elif len(val) >= 2 and val.startswith('"') and val.endswith('"'):
@@ -1070,6 +1101,23 @@ def _read_env_value(key, default=""):
                         return val
     except Exception:
         pass
+    return default
+
+
+def _coerce_request_bool(val, default=False):
+    """Interpret JSON/body boolean fields; avoids truthiness bugs (e.g. bool('false') is True)."""
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        t = val.strip().lower()
+        if t in ("true", "1", "yes", "on"):
+            return True
+        if t in ("false", "0", "no", "off", ""):
+            return False
     return default
 
 
@@ -1132,44 +1180,53 @@ def _write_receive_enabled_to_volume(enabled):
 def set_network_feeds_settings():
     """Update network feed flags and optional secrets in .env; restart AIS connectors and vessel merger in background."""
     data = request.get_json() or {}
-    feed = data.get("feed_enabled", False)
-    receive = data.get("receive_enabled", False)
-    _persist_env_var("NETWORK_FEED_OUTBOUND_ENABLED", "true" if feed else "false")
-    _persist_env_var("NETWORK_FEED_INBOUND_ENABLED", "true" if receive else "false")
+    feed = _coerce_request_bool(data.get("feed_enabled"), False)
+    receive = _coerce_request_bool(data.get("receive_enabled"), False)
+    ok = True
+    ok = _persist_env_var("NETWORK_FEED_OUTBOUND_ENABLED", "true" if feed else "false") and ok
+    ok = _persist_env_var("NETWORK_FEED_INBOUND_ENABLED", "true" if receive else "false") and ok
     if "aisstream_api_key" in data:
         key = (data.get("aisstream_api_key") or "").strip()
         if key:
-            _persist_env_var("AISSTREAM_API_KEY", key)
+            ok = _persist_env_var("AISSTREAM_API_KEY", key) and ok
     if "aishub_poll_url" in data:
         url = (data.get("aishub_poll_url") or "").strip()
         if url:
-            _persist_env_var("AISHUB_POLL_URL", url)
+            ok = _persist_env_var("AISHUB_POLL_URL", url) and ok
     if "aiscatcher_sharedata" in data:
-        ac_on = bool(data.get("aiscatcher_sharedata"))
-        _persist_env_var("AISCATCHER_SHAREDATA", "true" if ac_on else "false")
+        ac_on = _coerce_request_bool(data.get("aiscatcher_sharedata"), False)
+        ok = _persist_env_var("AISCATCHER_SHAREDATA", "true" if ac_on else "false") and ok
     if "aiscatcher_feeder_key" in data:
         fk = (data.get("aiscatcher_feeder_key") or "").strip()
         if fk:
-            _persist_env_var("AISCATCHER_FEEDER_KEY", fk)
+            ok = _persist_env_var("AISCATCHER_FEEDER_KEY", fk) and ok
     if "aiscatcher_sharekey" in data:
         sk = (data.get("aiscatcher_sharekey") or "").strip()
         if sk:
-            _persist_env_var("AISCATCHER_SHAREKEY", sk)
+            ok = _persist_env_var("AISCATCHER_SHAREKEY", sk) and ok
     if "aisfriends_api_v1_enabled" in data:
-        af_on = bool(data.get("aisfriends_api_v1_enabled"))
-        _persist_env_var("AISFRIENDS_API_V1_ENABLED", "true" if af_on else "false")
+        af_on = _coerce_request_bool(data.get("aisfriends_api_v1_enabled"), False)
+        ok = _persist_env_var("AISFRIENDS_API_V1_ENABLED", "true" if af_on else "false") and ok
     if "aisfriends_api_key" in data:
         afk = (data.get("aisfriends_api_key") or "").strip()
         if afk:
-            _persist_env_var("AISFRIENDS_API_KEY", afk)
+            ok = _persist_env_var("AISFRIENDS_API_KEY", afk) and ok
     if "aisfriends_api_base_url" in data:
         afb = (data.get("aisfriends_api_base_url") or "").strip()
         if afb:
-            _persist_env_var("AISFRIENDS_API_BASE_URL", afb.rstrip("/"))
+            ok = _persist_env_var("AISFRIENDS_API_BASE_URL", afb.rstrip("/")) and ok
     if "aisfriends_station_id" in data:
         afs = (data.get("aisfriends_station_id") or "").strip()
         if afs:
-            _persist_env_var("AISFRIENDS_STATION_ID", afs)
+            ok = _persist_env_var("AISFRIENDS_STATION_ID", afs) and ok
+    if not ok:
+        return jsonify({
+            "success": False,
+            "error": (
+                f"Could not write .env under {_install_dir()}. "
+                "Set INSTALL_DIR to your install root (same path as in docker-compose volume for .env) and ensure the file is writable."
+            ),
+        }), 500
     _write_receive_enabled_to_volume(receive)
     thread = threading.Thread(target=_restart_network_feed_containers_background, daemon=True)
     thread.start()
@@ -1207,14 +1264,16 @@ def set_mail_settings():
     - If enabling mail but there is no key, returns 400.
     """
     data = request.get_json() or {}
-    enabled = bool(data.get("enabled", False))
+    enabled = _coerce_request_bool(data.get("enabled"), False)
     api_key = (data.get("api_key") or "").strip()
     pending_user_recipients = data.get("pending_user_recipients", None)
 
     existing_api_key = (_read_env_value("RESEND_API_KEY", "") or "").strip()
+    ok = True
     if api_key:
-        _persist_env_var("RESEND_API_KEY", api_key)
-        existing_api_key = api_key
+        ok = _persist_env_var("RESEND_API_KEY", api_key) and ok
+        if ok:
+            existing_api_key = api_key
 
     if enabled and not existing_api_key:
         return jsonify({"success": False, "error": "api_key is required when enabling mail"}), 400
@@ -1229,9 +1288,17 @@ def set_mail_settings():
             return jsonify({"success": False, "error": "pending_user_recipients must be an array or a comma-separated string"}), 400
 
         normalized = [p for p in parts if p]
-        _persist_env_var("RESEND_ADMIN_EMAILS", ",".join(normalized))
+        ok = _persist_env_var("RESEND_ADMIN_EMAILS", ",".join(normalized)) and ok
 
-    _persist_env_var("RESEND_ENABLED", "true" if enabled else "false")
+    ok = _persist_env_var("RESEND_ENABLED", "true" if enabled else "false") and ok
+    if not ok:
+        return jsonify({
+            "success": False,
+            "error": (
+                f"Could not write .env under {_install_dir()}. "
+                "Confirm INSTALL_DIR matches your compose .env mount and the file is writable."
+            ),
+        }), 500
     return jsonify({
         "success": True,
         "message": "Mail settings saved.",
@@ -1243,9 +1310,9 @@ def set_mail_settings():
 def _restart_dashboard_background():
     """Apply .env changes that affect the dashboard container environment."""
     try:
-        restart_container("taknet-dashboard")
+        restart_container("taknet-ais-dashboard")
     except Exception as e:
-        print(f"[api] Background restart taknet-dashboard: {e}")
+        print(f"[api] Background restart taknet-ais-dashboard: {e}")
 
 
 @bp.route("/settings/cot-push", methods=["GET"])
@@ -1281,6 +1348,7 @@ def set_cot_push_settings():
     """Persist CoT-related .env keys; restart dashboard once when anything changes."""
     data = request.get_json() or {}
     did = False
+    ok = True
     if "chunk_messages" in data and data.get("chunk_messages") is not None:
         raw = data.get("chunk_messages", data.get("cot_send_chunk_messages"))
         try:
@@ -1288,7 +1356,7 @@ def set_cot_push_settings():
         except (TypeError, ValueError):
             return jsonify({"success": False, "error": "chunk_messages must be an integer between 1 and 5000"}), 400
         n = max(1, min(5000, n))
-        _persist_env_var("COT_SEND_CHUNK_MESSAGES", str(n))
+        ok = _persist_env_var("COT_SEND_CHUNK_MESSAGES", str(n)) and ok
         did = True
     if "use_template" in data:
         raw = data.get("use_template", data.get("cot_xml_use_template"))
@@ -1296,10 +1364,18 @@ def set_cot_push_settings():
             use = raw.strip().lower() in ("1", "true", "yes", "on")
         else:
             use = bool(raw)
-        _persist_env_var("COT_XML_USE_TEMPLATE", "true" if use else "false")
+        ok = _persist_env_var("COT_XML_USE_TEMPLATE", "true" if use else "false") and ok
         did = True
     if not did:
         return jsonify({"success": False, "error": "Provide chunk_messages and/or use_template"}), 400
+    if not ok:
+        return jsonify({
+            "success": False,
+            "error": (
+                f"Could not write .env under {_install_dir()}. "
+                "Confirm INSTALL_DIR matches your compose .env mount and the file is writable."
+            ),
+        }), 500
     thread = threading.Thread(target=_restart_dashboard_background, daemon=True)
     thread.start()
     return jsonify({

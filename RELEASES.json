@@ -1,5 +1,20 @@
 [
   {
+    "version": "0.1.9",
+    "date": "2026-04-02",
+    "notes": "Config → Services: fix .env persistence and reload — normalize .env lines (BOM, export prefix), read INSTALL_DIR at write time, return API errors when .env is not writable; Services fetch uses same-origin credentials and surfaces HTTP errors. CoT save restart uses container name taknet-ais-dashboard."
+  },
+  {
+    "version": "0.1.8",
+    "date": "2026-04-02",
+    "notes": "ais-proxy optional UDP forward of AIVDM/AIVDO lines: AIS_UDP_FORWARD_ENABLED, AIS_UDP_FORWARD_TARGETS (host:port, comma-separated), AIS_UDP_FORWARD_DNS_TTL_S; wired in docker-compose and env.example. AIS Friends UDP can use built-in forwarder or shipfeeder; README and Services copy updated."
+  },
+  {
+    "version": "0.1.7",
+    "date": "2026-04-02",
+    "notes": "Docs: AIS Friends station setup — UDP feed to ais.aisfriends.com on registration-assigned port (e.g. 11884); shipfeeder AISFRIENDS_UDP_PORT; clarified vs API v1 fields in README, env.example, and Config → Services."
+  },
+  {
     "version": "0.1.6",
     "date": "2026-04-02",
     "notes": "Map (/map): Leaflet OSM with Combined (network) vs Direct (feeders) like ADS-B merged/tar1090 split. Combined uses VESSELS_JSON_URL via /api/aircraft.json; Direct uses DIRECT_VESSELS_JSON_URL (default ais-core) via /api/vessels-direct.json. Orange markers for network source tags; SITE_LAT/SITE_LON for default center."

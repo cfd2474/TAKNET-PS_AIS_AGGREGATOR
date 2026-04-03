@@ -21,6 +21,10 @@ services:
       - NETBIRD_API_TOKEN=${NETBIRD_API_TOKEN:-}
       - NETBIRD_CIDR=${NETBIRD_CIDR:-100.64.0.0/10}
       - GEOIP_ENABLED=${GEOIP_ENABLED:-true}
+      # Optional: copy feeder NMEA to UDP targets (e.g. AIS Friends — ais.aisfriends.com:assigned_port)
+      - AIS_UDP_FORWARD_ENABLED=${AIS_UDP_FORWARD_ENABLED:-false}
+      - AIS_UDP_FORWARD_TARGETS=${AIS_UDP_FORWARD_TARGETS:-}
+      - AIS_UDP_FORWARD_DNS_TTL_S=${AIS_UDP_FORWARD_DNS_TTL_S:-300}
     ports:
       - "${AIS_FEEDER_PORT:-10110}:10110/tcp"
     volumes:

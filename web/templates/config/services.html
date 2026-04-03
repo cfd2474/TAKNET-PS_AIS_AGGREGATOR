@@ -25,7 +25,7 @@
         </div>
         <div style="margin-bottom:16px;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);">
             <p style="font-size:12px;font-weight:600;color:var(--text-secondary);margin:0 0 10px;">AIS Friends — API v1 (bidirectional)</p>
-            <p style="font-size:11px;color:var(--text-muted);margin:0 0 12px;">Follow <a href="https://www.aisfriends.com/docs/api/v1" target="_blank" rel="noopener">AIS Friends API v1</a> for authentication and endpoint details. UDP feeding from a receiver uses <code>AISFRIENDS_UDP_PORT</code> in shipfeeder; these variables are for HTTP/API-based ingest and push via a connector.</p>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 12px;">After registration, AIS Friends asks you to send your AIS feed by <strong>UDP</strong> to <code>ais.aisfriends.com</code> on the <strong>port they assign you</strong> (e.g. <code>11884</code>). This stack can mirror feeder NMEA from <strong>ais-proxy</strong>: set <code>AIS_UDP_FORWARD_ENABLED=true</code> and <code>AIS_UDP_FORWARD_TARGETS=ais.aisfriends.com:11884</code> in <code>.env</code>, then rebuild/restart <code>ais-proxy</code> (see <code>env.example</code>). Or use <a href="https://github.com/sdr-enthusiasts/docker-shipfeeder?tab=readme-ov-file#feeding-ais-aggregator-services" target="_blank" rel="noopener">docker-shipfeeder</a> <code>AISFRIENDS_UDP_PORT</code>. The fields below are for <a href="https://www.aisfriends.com/docs/api/v1" target="_blank" rel="noopener">API v1</a> (HTTP) — separate from UDP upload.</p>
             <label class="toggle-wrap" style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px;">
                 <input type="checkbox" id="network-feed-aisfriends-api" class="toggle">
                 <span>Enable API v1 connector (<code>AISFRIENDS_API_V1_ENABLED</code>)</span>
@@ -226,8 +226,12 @@ async function loadNetworkFeedsSettings() {
     const afBaseHint = document.getElementById('network-feed-aisfriends-base-hint');
     const afStationHint = document.getElementById('network-feed-aisfriends-station-hint');
     try {
-        const r = await fetch('/api/settings/network_feeds');
-        const d = await r.json();
+        const r = await fetch('/api/settings/network_feeds', { credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            msgEl.textContent = d.error || ('Could not load settings (HTTP ' + r.status + ').');
+            return;
+        }
         document.getElementById('network-feed-outbound').checked = !!d.feed_enabled;
         document.getElementById('network-feed-inbound').checked = !!d.receive_enabled;
         document.getElementById('network-feed-aisfriends-api').checked = !!d.aisfriends_api_v1_enabled;
@@ -389,10 +393,16 @@ async function saveNetworkFeeds() {
         if (hubUrl) body.aishub_poll_url = hubUrl;
         const r = await fetch('/api/settings/network_feeds', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
-        const d = await r.json();
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            msgEl.textContent = d.error || ('Save failed (HTTP ' + r.status + ').');
+            msgEl.style.color = 'var(--red)';
+            return;
+        }
         if (d.success) {
             msgEl.textContent = d.message || 'Saved.';
             msgEl.style.color = 'var(--green)';
@@ -412,8 +422,12 @@ async function saveNetworkFeeds() {
 
 async function loadResendMailSettings() {
     try {
-        const r = await fetch('/api/settings/mail');
-        const d = await r.json();
+        const r = await fetch('/api/settings/mail', { credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            document.getElementById('resend-msg').textContent = d.error || ('Could not load (HTTP ' + r.status + ').');
+            return;
+        }
         document.getElementById('resend-enabled').checked = !!d.enabled;
         document.getElementById('resend-api-key').value = '';
         if (d.api_key_present) {
@@ -442,10 +456,16 @@ async function saveResendMail() {
     try {
         const r = await fetch('/api/settings/mail', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enabled, api_key: apiKey, pending_user_recipients: resendPendingUserRecipients }),
         });
-        const d = await r.json();
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            msgEl.textContent = d.error || ('Save failed (HTTP ' + r.status + ').');
+            msgEl.style.color = 'var(--red)';
+            return;
+        }
         if (d.success) {
             msgEl.textContent = d.message || 'Saved.';
             msgEl.style.color = 'var(--green)';
@@ -468,8 +488,12 @@ async function loadCotPushSettings() {
     const inp = document.getElementById('cot-send-chunk-messages');
     const tpl = document.getElementById('cot-xml-use-template');
     try {
-        const r = await fetch('/api/settings/cot-push');
-        const d = await r.json();
+        const r = await fetch('/api/settings/cot-push', { credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            msgEl.textContent = d.error || ('Could not load (HTTP ' + r.status + ').');
+            return;
+        }
         inp.value = String(d.chunk_messages != null ? d.chunk_messages : 200);
         tpl.checked = !!d.use_template;
         msgEl.textContent = '';
@@ -495,10 +519,16 @@ async function saveCotPushSettings() {
     try {
         const r = await fetch('/api/settings/cot-push', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chunk_messages: n, use_template: useTemplate }),
         });
-        const d = await r.json();
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            msgEl.textContent = d.error || ('Save failed (HTTP ' + r.status + ').');
+            msgEl.style.color = 'var(--red)';
+            return;
+        }
         if (d.success) {
             msgEl.textContent = d.message || 'Saved.';
             msgEl.style.color = 'var(--green)';

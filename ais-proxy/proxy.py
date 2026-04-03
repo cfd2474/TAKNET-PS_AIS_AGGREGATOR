@@ -1,12 +1,15 @@
 """TAKNET-PS AIS TCP proxy — NMEA/AIVDM from feeders → ais-core.
 
-One upstream TCP session to ais-core per feeder connection. Optional ASCII
-prefix lines before the NMEA stream (e.g. TAKNET_FEEDER_CLAIM) can be parsed
-here once implemented.
+One upstream TCP session to ais-core per feeder connection. Optional UDP
+fan-out of AIVDM/AIVDO lines (see udp_forward / AIS_UDP_FORWARD_*). Optional
+ASCII prefix lines before the NMEA stream (e.g. TAKNET_FEEDER_CLAIM) can be
+parsed here once implemented.
 """
 
 import asyncio
 import os
+
+from udp_forward import make_line_demuxer, pipe_to_upstream_with_udp_tee
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "10110"))
@@ -45,8 +48,14 @@ async def handle_client(
             AIS_CORE_HOST, AIS_CORE_PORT
         )
         print(f"[ais-proxy] {ip} → {AIS_CORE_HOST}:{AIS_CORE_PORT}")
+        demux = make_line_demuxer()
+        upstream_task = (
+            pipe_to_upstream_with_udp_tee(reader, upstream_w, demux)
+            if demux is not None
+            else pipe(reader, upstream_w)
+        )
         await asyncio.gather(
-            pipe(reader, upstream_w),
+            upstream_task,
             pipe(upstream_r, writer),
         )
     except (ConnectionRefusedError, OSError) as e:
