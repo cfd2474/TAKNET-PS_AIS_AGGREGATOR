@@ -1,62 +1,86 @@
 # TAKNET-PS AIS Aggregator
 
-Distributed **AIS** (marine vessel tracking) aggregation stack: ingress proxy with feeder classification, a core decode path, merged network feeds, a map-oriented JSON feed, Flask dashboard, public REST API, and nginx on the front.
+Distributed **AIS** (marine vessel tracking) aggregation stack. The **`web/`** dashboard is recreated from [TAKNET-PS Aggregator](https://github.com/cfd2474/TAKNET-PS_Aggregator) with the same **routes, JSON APIs, services, and UI sections**, adapted for **vessels** (`vessels.json` / `VESSELS_JSON_URL`) instead of **aircraft** (`aircraft.json`).
 
 ---
 
-## Architecture
+## Architecture (parity with ADS-B stack)
 
-| Role | Component |
-|------|-----------|
-| Feeder ingress | **`ais-proxy`** — TCP NMEA/AIVDM, NetBird/GeoIP, SQLite (when wired), optional `TAKNET_FEEDER_CLAIM` prefix |
-| Core processing | **`ais-core`** — NMEA ingest, AIVDM/AIVDO decode (`pyais`), MMSI-keyed tracks |
-| Map / live JSON | **`ais-map`** or dashboard embed → **`vessels.json`** |
-| Optional merge | **`vessel-merger`** — local + AISstream / AIShub-style feeds, prefer local MMSI |
-| Dashboard | Flask **`web/`** — auth, feeders, health, updates |
-| Public API | **`api-server`** — REST over merged `vessels.json` |
-| Edge | **`nginx`** — `/`, `/api/`, `/v2/`, map paths |
-| VPN | NetBird (or Tailscale) CIDR classification for feeder IPs |
+| ADS-B role | AIS equivalent |
+|------------|----------------|
+| `beast-proxy` | **`ais-proxy`** — NMEA TCP from feeders |
+| `readsb` + `tar1090` | **`ais-core`** — decode + **`/data/vessels.json`** |
+| `mlat-server` | *(not used for AIS)* |
+| `aircraft-merger` + ADSBHub | **`vessel-merger`** + AIShub / AISstream *(when added)* |
+| `adsbhub-feeder` | Outbound feed services *(optional)* |
+| Flask **`web/`** | **Same** — dashboard, inputs, config, outputs, API, tunnel |
+| `api-server` (`/v2/`) | **`api-server`** *(add when ready)* |
+| `nginx` | **`nginx`** *(optional front edge)* |
 
-Optional inbound network feeds (e.g. satellite AIS) can follow the same merge pattern as other remote sources.
+---
+
+## Dashboard sections (same features as ADS-B aggregator)
+
+| Area | Routes / behavior |
+|------|-------------------|
+| **Auth** | `/login`, `/register`, `/pending`, `/profile`, `/forgot-password`, `/reset-password/<token>` |
+| **Dashboard** | `/`, `/dashboard` — stats, feeder breakdown, system health, network-feed status, activity |
+| **Inputs** | `/inputs/feeders`, `/inputs/feeder/<id>` — feeder registry & detail |
+| **Map** | `/map` — placeholder for vessel map (embed `vessels.json`) |
+| **Statistics** | `/stats` — graphs slot (embed when ready) |
+| **Outputs** | `/outputs`, CoT proxy pages — JSON / CoT outputs (schema shared with ADS-B) |
+| **Config** | `/config` — VPN, services (Docker), health, diagnostics, updates, **users** |
+| **API (dashboard)** | `/api/*` — status, feeders, vessels.json proxy, docker, VPN, updates, settings, outputs, diagnostics |
+| **About** | `/about` |
+| **Feeder tunnel** | `/feeder` WebSocket paths — when `feeder_tunnel` module loads |
+
+Environment highlights:
+
+- **`VESSELS_JSON_URL`** — merged or local JSON (default in Compose: `http://ais-core:4001/data/vessels.json`). Legacy **`AIRCRAFT_JSON_URL`** is still read as a fallback key for the same setting.
+- **`GITHUB_REPO`** — OTA updates clone target (default `cfd2474/TAKNET-PS_AIS_AGGREGATOR`).
+- **`NETWORK_FEEDS_STATUS_PATH`** / **`ADSBHUB_STATUS_PATH`** — shared directory for connector status files (same JSON shape as ADS-B ADSBHub status).
 
 ---
 
 ## Data plane
 
-- Feeders send **NMEA 0183** over TCP (often port **10110**). Payloads are typically `!AIVDM` / `!AIVDO`.
-- **`ais-proxy`** accepts feeder TCP connections, optionally metadata lines (claim key), then forwards the stream to **`ais-core`**.
-- **`ais-core`** decodes messages, maintains MMSI-keyed state, and serves **`/data/vessels.json`** for downstream services.
+- Feeders send **NMEA 0183** over TCP (often **10110**): `!AIVDM` / `!AIVDO`.
+- **`ais-proxy`** → **`ais-core`** → **`vessels.json`** for the UI and APIs.
 
 ---
 
-## Repository layout (target)
+## Repository layout
 
 ```
 TAKNET-PS_AIS_AGGREGATOR/
 ├── docker-compose.yml
 ├── env.example
-├── install.sh
+├── RELEASES.json
+├── VERSION
+├── var/                         # host health + network-feed status (mounted to dashboard /app/var)
 ├── ais-proxy/
 ├── ais-core/
-├── vessel-merger/
-├── web/
-├── api-server/
+├── web/                         # full Flask app (parity with ADS-B web)
+├── vessel-merger/              # optional — to be added
+├── api-server/                 # optional public REST
 ├── nginx/
 └── README.md
 ```
 
 ---
 
-## Next implementation steps
+## Operations
 
-1. Extend **`ais-proxy`** with SQLite, VPN/GeoIP classification, and feeder claim handling.
-2. Harden **`ais-core`** (multi-part AIVDM, rate limits) and stabilize **`vessels.json`** (`schema_version`).
-3. Implement **`vessel-merger`** and network connectors (AISstream, AIShub API).
-4. Add **`web/`** and **`nginx`** routes for the AIS map and management UI.
-5. Add **`taknet-ais`** CLI for operations (`start`, `logs`, `update`).
+- **Dashboard:** `WEB_PORT` (default **5000**). Default admin: **`admin`** / **`password`** — change immediately.
+- **Database:** SQLite `DB_PATH` (`/data/ais_aggregator.db`), shared volume **`ais-db-data`** with **`ais-proxy`** when SQLite is enabled there.
+- **Docker:** Dashboard mounts **`/var/run/docker.sock`** for **Services** page.
+- **Secrets:** `SECRET_KEY`, Resend (`RESEND_*`), NetBird (`NETBIRD_*`), etc. in `.env`.
 
 ---
 
-## Operations
+## Next steps
 
-Document NetBird (or VPN) hostnames and the AIS TCP port for feeder operators. Keep secrets in `.env` only.
+1. Harden **`ais-proxy`** (SQLite, VPN classification, claim line).
+2. Add **`vessel-merger`** and network connectors; point **`VESSELS_JSON_URL`** at the merger.
+3. Add **`api-server`** + **`nginx`** for public `/v2/` and TLS.
+4. Replace **map** template with a real **Leaflet/MapLibre** view over **`vessels.json`**.

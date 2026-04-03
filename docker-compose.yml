@@ -45,11 +45,40 @@ services:
     networks:
       - taknet-ais-internal
 
-  # dashboard:
-  #   build:
-  #     context: ./web
-  #     dockerfile: Dockerfile
-  #   ...
+  dashboard:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: taknet-ais-dashboard
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - DB_PATH=/data/ais_aggregator.db
+      - SECRET_KEY=${SECRET_KEY:-change-me}
+      - SITE_NAME=${SITE_NAME:-TAKNET-PS AIS Aggregator}
+      - INSTALL_DIR=/app
+      - GITHUB_REPO=${GITHUB_REPO:-cfd2474/TAKNET-PS_AIS_AGGREGATOR}
+      - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
+      - READSB_HOST=${READSB_HOST:-ais-core}
+      - NETWORK_FEEDS_STATUS_PATH=/app/var/network-feeds-status
+      - ADSBHUB_STATUS_PATH=/app/var/network-feeds-status
+      - RESEND_ENABLED=${RESEND_ENABLED:-false}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-noreply@notify.tak-solutions.com}
+      - RESEND_ADMIN_EMAILS=${RESEND_ADMIN_EMAILS:-}
+    volumes:
+      - ais-db-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./var:/app/var
+      - ./RELEASES.json:/app/RELEASES.json:ro
+      - ./VERSION:/app/VERSION:ro
+    ports:
+      - "${WEB_PORT:-5000}:5000"
+    networks:
+      - taknet-ais-internal
+    depends_on:
+      ais-core:
+        condition: service_started
 
   # api:
   #   build:
