@@ -1,5 +1,10 @@
 [
   {
+    "version": "0.1.5",
+    "date": "2026-04-02",
+    "notes": "Fix dashboard auto-update (docker:cli exit 1): INSTALL_DIR was /app so Docker bind-mounted the host /app instead of the real install tree. Compose now uses INSTALL_DIR from .env (default /opt/taknet-ais-aggregator) for dashboard mounts (.env, var, VERSION, RELEASES) like ADS-B; docker.sock rw. Update script installs git in docker:cli if missing, quotes paths, and compose pull no longer fails the whole run. Abort update early with a clear message if INSTALL_DIR is still /app."
+  },
+  {
     "version": "0.1.4",
     "date": "2026-04-02",
     "notes": "AIS Friends API v1 (bidirectional): AISFRIENDS_API_V1_ENABLED, AISFRIENDS_API_KEY, optional AISFRIENDS_API_BASE_URL and AISFRIENDS_STATION_ID in Services and /api/settings/network_feeds. Remote source aisfriends for stats, outputs, CoT. Docs link https://www.aisfriends.com/docs/api/v1; compose stub taknet-aisfriends-connector; restart hook updated. Clarifies UDP path remains AISFRIENDS_UDP_PORT in shipfeeder."

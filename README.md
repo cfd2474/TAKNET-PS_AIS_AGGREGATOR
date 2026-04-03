@@ -105,8 +105,9 @@ After install: **`taknet-ais status`**, **`taknet-ais logs`**, **`taknet-ais upd
 
 - **Dashboard:** `WEB_PORT` (default **5000**). Default admin: **`admin`** / **`password`** — change immediately.
 - **Database:** SQLite `DB_PATH` (`/data/ais_aggregator.db`), shared volume **`ais-db-data`** with **`ais-proxy`** when SQLite is enabled there.
-- **Docker:** Dashboard mounts **`/var/run/docker.sock`** for **Services** page.
+- **Docker:** Dashboard mounts **`/var/run/docker.sock`** (read/write) for **Services** and **Config → Updates**.
 - **Secrets:** `SECRET_KEY`, Resend (`RESEND_*`), NetBird (`NETBIRD_*`), etc. in `.env`.
+- **Web UI updates (docker:cli):** **`INSTALL_DIR`** in `.env` must be the **absolute host path** to the install root (default **`/opt/taknet-ais-aggregator`**). Compose bind-mounts `${INSTALL_DIR}/.env`, `var/`, `VERSION`, and `RELEASES.json` into the dashboard and passes the same path to the update job. If `INSTALL_DIR` was **`/app`**, Docker bind-mounts the **host’s** `/app`, so `docker compose` finds no project files and exits **1**. For a clone outside `/opt/...`, set **`INSTALL_DIR`** to that directory’s absolute path before `docker compose up`.
 
 ---
 

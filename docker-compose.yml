@@ -56,7 +56,8 @@ services:
       - DB_PATH=/data/ais_aggregator.db
       - SECRET_KEY=${SECRET_KEY:-change-me}
       - SITE_NAME=${SITE_NAME:-TAKNET-PS AIS Aggregator}
-      - INSTALL_DIR=/app
+      # Host-absolute install root (same as INSTALL_DIR in .env). Required for web UI updates: docker:cli bind-mounts this path on the Docker host — must NOT be /app.
+      - INSTALL_DIR=${INSTALL_DIR:-/opt/taknet-ais-aggregator}
       - GITHUB_REPO=${GITHUB_REPO:-cfd2474/TAKNET-PS_AIS_AGGREGATOR}
       - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
       - READSB_HOST=${READSB_HOST:-ais-core}
@@ -67,10 +68,11 @@ services:
       - RESEND_ADMIN_EMAILS=${RESEND_ADMIN_EMAILS:-}
     volumes:
       - ais-db-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./var:/app/var
-      - ./RELEASES.json:/app/RELEASES.json:ro
-      - ./VERSION:/app/VERSION:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - ${INSTALL_DIR:-/opt/taknet-ais-aggregator}/.env:${INSTALL_DIR:-/opt/taknet-ais-aggregator}/.env:rw
+      - ${INSTALL_DIR:-/opt/taknet-ais-aggregator}/var:/app/var
+      - ${INSTALL_DIR:-/opt/taknet-ais-aggregator}/RELEASES.json:/app/RELEASES.json:ro
+      - ${INSTALL_DIR:-/opt/taknet-ais-aggregator}/VERSION:/app/VERSION:ro
     ports:
       - "${WEB_PORT:-5000}:5000"
     networks:

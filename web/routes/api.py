@@ -5,6 +5,7 @@ import re
 import math
 import os
 import queue
+import shlex
 import threading
 import time
 
@@ -89,26 +90,52 @@ def _run_update():
         except Exception:
             pass
 
-        # Shell script that runs entirely inside docker:cli which has INSTALL_DIR
-        # bind-mounted from the host — so all file writes land on the host filesystem.
+        # Dashboard compose must set INSTALL_DIR to the host install root, not /app (see docker-compose.yml).
+        _id_norm = (INSTALL_DIR or "").rstrip("/")
+        if _id_norm == "/app":
+            log(
+                "Update aborted: INSTALL_DIR is /app. Docker would bind-mount the host's /app (wrong). "
+                "Set INSTALL_DIR in .env to your real install path (e.g. /opt/taknet-ais-aggregator), "
+                "match dashboard volumes in docker-compose.yml, recreate the dashboard, then retry.",
+                "error",
+            )
+            return
+
+        # INSTALL_DIR must be the host-absolute install root (e.g. /opt/taknet-ais-aggregator).
+        # If it is a container-only path like /app, Docker binds the host's /app and compose fails.
+        inst_q = shlex.quote(INSTALL_DIR)
+        repo_safe = GITHUB_REPO.replace("'", "'\"'\"'")
+
+        # Shell script runs in docker:cli; host install dir is bind-mounted at INSTALL_DIR.
         script = f"""
 set -e
-echo "Cloning https://github.com/{GITHUB_REPO}.git ..."
+export TAKNET_INSTALL_ROOT={inst_q}
+if ! command -v git >/dev/null 2>&1; then
+  echo "Installing git in docker:cli (one-time)..."
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq git
+  else
+    echo "ERROR: git is not available in this image. Use a docker:cli image with git or install git." >&2
+    exit 1
+  fi
+fi
+echo "Cloning https://github.com/{repo_safe}.git ..."
 TMPDIR=$(mktemp -d)
-git clone --depth 1 https://github.com/{GITHUB_REPO}.git $TMPDIR/repo
+git clone --depth 1 "https://github.com/{repo_safe}.git" "$TMPDIR/repo"
 echo "Clone complete."
-NEW_VER=$(cat $TMPDIR/repo/VERSION 2>/dev/null || echo unknown)
+NEW_VER=$(cat "$TMPDIR/repo/VERSION" 2>/dev/null || echo unknown)
 echo "Updating to v$NEW_VER ..."
-# Copy all files except .git to INSTALL_DIR on the host
-cd $TMPDIR/repo
+cd "$TMPDIR/repo"
 for item in $(ls -A | grep -v '^[.]git$'); do
-    cp -r $item {INSTALL_DIR}/
+  cp -r "$item" "$TAKNET_INSTALL_ROOT/"
 done
-rm -rf $TMPDIR
+rm -rf "$TMPDIR"
 echo "Files updated on host."
 echo "Pulling updated images..."
-cd {INSTALL_DIR}
-docker compose pull 2>&1
+cd "$TAKNET_INSTALL_ROOT"
+docker compose pull 2>&1 || echo "(compose pull had warnings — continuing)"
 echo "Building local images..."
 docker compose build dashboard ais-proxy ais-core 2>&1
 echo "PRE_RESTART"
