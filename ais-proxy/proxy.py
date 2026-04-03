@@ -1,8 +1,8 @@
 """TAKNET-PS AIS TCP proxy — NMEA/AIVDM from feeders → ais-core.
 
-Mirrors the beast-proxy pattern: one asyncio connection to ais-core per feeder
-session. Optional ASCII prefix lines before NMEA (claim key) can be added
-next to match TAKNET_FEEDER_CLAIM behavior from the ADS-B stack.
+One upstream TCP session to ais-core per feeder connection. Optional ASCII
+prefix lines before the NMEA stream (e.g. TAKNET_FEEDER_CLAIM) can be parsed
+here once implemented.
 """
 
 import asyncio

@@ -1,5 +1,4 @@
-# TAKNET-PS AIS Aggregator — skeleton aligned with TAKNET-PS ADS-B Aggregator
-# Implement ais-core, web, api-server, then uncomment services.
+# TAKNET-PS AIS Aggregator — AIS-only stack (uncomment services as they are added).
 
 name: taknet-ais-aggregator
 
