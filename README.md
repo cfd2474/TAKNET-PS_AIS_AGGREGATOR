@@ -69,6 +69,34 @@ TAKNET-PS_AIS_AGGREGATOR/
 
 ---
 
+## Install (bash from Git or curl)
+
+**Requires:** root, Git, curl, Docker Engine + `docker compose` plugin. On Rocky/Alma/RHEL the script can install Docker via dnf; on Debian/Ubuntu install Docker first from [Docker’s docs](https://docs.docker.com/engine/install/).
+
+```bash
+# From a clone (recommended)
+git clone https://github.com/cfd2474/TAKNET-PS_AIS_AGGREGATOR.git
+cd TAKNET-PS_AIS_AGGREGATOR
+sudo bash install.sh
+```
+
+```bash
+# One-liner (set REPO URL to your fork if needed)
+curl -sSL https://raw.githubusercontent.com/cfd2474/TAKNET-PS_AIS_AGGREGATOR/main/install.sh | sudo bash
+```
+
+Override clone URL or install path without editing the script:
+
+```bash
+sudo TAKNET_AIS_REPO_URL=https://github.com/you/TAKNET-PS_AIS_AGGREGATOR.git \
+     TAKNET_AIS_INSTALL_DIR=/opt/taknet-ais-aggregator \
+     bash install.sh
+```
+
+After install: **`taknet-ais status`**, **`taknet-ais logs`**, **`taknet-ais update`**.
+
+---
+
 ## Operations
 
 - **Dashboard:** `WEB_PORT` (default **5000**). Default admin: **`admin`** / **`password`** — change immediately.
