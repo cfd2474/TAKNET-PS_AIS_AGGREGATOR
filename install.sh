@@ -232,7 +232,7 @@ ok "CLI installed: taknet-ais"
 # ── Compose up ─────────────────────────────────────────────────────────────
 info "Building and starting containers..."
 cd "$INSTALL_DIR"
-for cname in taknet-ais-dashboard taknet-ais-proxy taknet-ais-core; do
+for cname in taknet-ais-dashboard taknet-ais-proxy taknet-ais-core taknet-aisstream-connector taknet-vessel-merger; do
     docker rm -f "$cname" 2>/dev/null || true
 done
 docker compose up -d --build

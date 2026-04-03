@@ -61,6 +61,7 @@
         </div>
         <div style="margin-bottom:16px;">
             <label for="network-feed-aisstream-key" style="display:block;font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">AISstream API key (<code>AISSTREAM_API_KEY</code>)</label>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Ingest uses <a href="https://aisstream.io/documentation" target="_blank" rel="noopener">AISstream’s WebSocket API</a> (<code>wss://stream.aisstream.io/v0/stream</code>) with a bounding box around <code>SITE_LAT</code>/<code>SITE_LON</code> (override with <code>AISSTREAM_BOUNDING_BOXES</code> in <code>.env</code>). The stack must run <code>aisstream-connector</code> + <code>vessel-merger</code>; <strong>Combined</strong> map reads merged <code>VESSELS_JSON_URL</code>. After saving, rebuild/restart those containers.</p>
             <input type="password" id="network-feed-aisstream-key" class="form-control" placeholder="Paste API key from aisstream.io"
                    style="max-width:400px;font-family:monospace;font-size:13px;" autocomplete="off">
             <p id="network-feed-aisstream-key-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;margin-bottom:0;"></p>

@@ -147,7 +147,7 @@ echo "Pulling updated images..."
 cd "$TAKNET_INSTALL_ROOT"
 docker compose pull 2>&1 || echo "(compose pull had warnings — continuing)"
 echo "Building local images..."
-docker compose build dashboard ais-proxy ais-core 2>&1
+docker compose build dashboard ais-proxy ais-core aisstream-connector vessel-merger 2>&1
 echo "PRE_RESTART"
 sleep 3
 echo "Restarting containers..."

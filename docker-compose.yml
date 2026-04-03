@@ -49,6 +49,45 @@ services:
     networks:
       - taknet-ais-internal
 
+  aisstream-connector:
+    build:
+      context: ./aisstream-connector
+      dockerfile: Dockerfile
+    container_name: taknet-aisstream-connector
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - AISSTREAM_API_KEY=${AISSTREAM_API_KEY:-}
+      - SITE_LAT=${SITE_LAT:-33.8753}
+      - SITE_LON=${SITE_LON:--117.5664}
+      - AISSTREAM_BOUNDING_BOXES=${AISSTREAM_BOUNDING_BOXES:-}
+      - AISSTREAM_BBOX_SPAN_DEG=${AISSTREAM_BBOX_SPAN_DEG:-6}
+      - AISSTREAM_HTTP_PORT=4002
+    networks:
+      - taknet-ais-internal
+    depends_on:
+      ais-core:
+        condition: service_started
+
+  vessel-merger:
+    build:
+      context: ./vessel-merger
+      dockerfile: Dockerfile
+    container_name: taknet-vessel-merger
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/Los_Angeles}
+      - AIS_CORE_URL=http://ais-core:4001
+      - AISSTREAM_URL=http://aisstream-connector:4002
+      - MERGER_HTTP_PORT=4003
+    networks:
+      - taknet-ais-internal
+    depends_on:
+      ais-core:
+        condition: service_started
+      aisstream-connector:
+        condition: service_started
+
   dashboard:
     build:
       context: ./web
@@ -63,7 +102,8 @@ services:
       # Host-absolute install root (same as INSTALL_DIR in .env). Required for web UI updates: docker:cli bind-mounts this path on the Docker host — must NOT be /app.
       - INSTALL_DIR=${INSTALL_DIR:-/opt/taknet-ais-aggregator}
       - GITHUB_REPO=${GITHUB_REPO:-cfd2474/TAKNET-PS_AIS_AGGREGATOR}
-      - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
+      # Combined map: merged ais-core (feeders) + AISstream; set to ais-core URL to disable merger
+      - VESSELS_JSON_URL=${VESSELS_JSON_URL:-http://vessel-merger:4003/data/vessels.json}
       - DIRECT_VESSELS_JSON_URL=${DIRECT_VESSELS_JSON_URL:-http://ais-core:4001/data/vessels.json}
       - READSB_HOST=${READSB_HOST:-ais-core}
       - SITE_LAT=${SITE_LAT:-33.8753}
@@ -86,6 +126,8 @@ services:
       - taknet-ais-internal
     depends_on:
       ais-core:
+        condition: service_started
+      vessel-merger:
         condition: service_started
 
   # Optional: aiscatcher.org exchange connector (reads AISCATCHER_* from host .env).

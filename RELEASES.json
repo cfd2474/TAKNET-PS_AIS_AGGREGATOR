@@ -1,5 +1,10 @@
 [
   {
+    "version": "0.2.0",
+    "date": "2026-04-02",
+    "notes": "AISstream.io data pull: aisstream-connector (WebSocket wss://stream.aisstream.io/v0/stream per docs — APIKey + BoundingBoxes, optional FilterMessageTypes) and vessel-merger (ais-core + AISstream for Combined map). Compose defaults VESSELS_JSON_URL to vessel-merger:4003. Env AISSTREAM_BOUNDING_BOXES / AISSTREAM_BBOX_SPAN_DEG. README, env.example, Services UI, install.sh, OTA build list updated."
+  },
+  {
     "version": "0.1.9",
     "date": "2026-04-02",
     "notes": "Config → Services: fix .env persistence and reload — normalize .env lines (BOM, export prefix), read INSTALL_DIR at write time, return API errors when .env is not writable; Services fetch uses same-origin credentials and surfaces HTTP errors. CoT save restart uses container name taknet-ais-dashboard."
